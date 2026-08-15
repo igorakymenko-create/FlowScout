@@ -96,6 +96,31 @@ _FIND_TRIGGER_JS = r"""
 """
 
 
+def _wait_for_any_field(page, max_wait_ms: int = 3000, poll_interval_ms: int = 150) -> None:
+    """A flat sleep after 'load' isn't long enough for every site --
+    found live on a real client-side-rendered login page
+    (account.proton.me/mail): its actual form markup doesn't exist in
+    the DOM at all until somewhere between ~450ms and ~600ms after
+    'load' fires (measured directly: 0 elements at 400ms, 3 at 500ms+,
+    consistent across repeated runs -- a one-time step, not a flicker,
+    checked before trusting a single-poll fix). A fixed 400ms sleep
+    read the page mid-render and reported nothing.
+
+    Polls for ANY input/textarea/select to appear, checking every
+    poll_interval_ms, capped at max_wait_ms -- fast for a page that's
+    already rendered (most of them, no behavior change there), patient
+    for one that's still hydrating. If the page genuinely has nothing
+    (no form at all), this spends the full budget before giving up --
+    acceptable here: detect_fields() is a one-off, human-triggered
+    lookup, not part of the crawl's own budget-sensitive loop."""
+    elapsed = 0
+    while elapsed < max_wait_ms:
+        if page.evaluate('document.querySelectorAll("input, textarea, select").length') > 0:
+            return
+        page.wait_for_timeout(poll_interval_ms)
+        elapsed += poll_interval_ms
+
+
 def _dedupe(fields: list[dict]) -> list[dict]:
     seen = set()
     out = []
@@ -124,7 +149,7 @@ def detect_fields(start_url: str, timeout_ms: int = 20000) -> dict:
             page = browser.new_context().new_page()
             try:
                 page.goto(start_url, wait_until="load", timeout=timeout_ms)
-                page.wait_for_timeout(400)
+                _wait_for_any_field(page)
                 fields = page.evaluate(_FIELD_SCAN_JS)
 
                 # Only chase a trigger when the landing page shows NOTHING
@@ -165,7 +190,15 @@ def detect_fields(start_url: str, timeout_ms: int = 20000) -> dict:
                                     page.locator(f'a[href="{href}"]').first.click(timeout=5000)
                                 else:
                                     page.get_by_text(trigger["text"], exact=False).first.click(timeout=5000)
-                                page.wait_for_timeout(800)
+                                # `fields` is guaranteed empty here (this
+                                # branch only runs when `not fields`), so
+                                # "wait for any field" after the click is
+                                # exactly the condition we're hoping the
+                                # click satisfied -- same reasoning as the
+                                # initial-page wait above, same client-
+                                # side-rendering risk on whatever page the
+                                # trigger navigated to.
+                                _wait_for_any_field(page)
                                 fields = fields + page.evaluate(_FIELD_SCAN_JS)
                                 result["clicked_trigger"] = trigger["text"] or href
                             except Exception:

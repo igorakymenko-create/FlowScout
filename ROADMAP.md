@@ -2109,3 +2109,55 @@ today.
 - Regression, saucedemo's login form (both fields already on the
   landing page, no click ever needed): unchanged, `clicked_trigger:
   null` before and after.
+
+## Detect fields: fixed sleep too short for a client-side-rendered page (found by user report, Aug 2026)
+
+Found by a user report against `account.proton.me/mail`: "Detect
+fields from site" found nothing at all -- no error, no fields, no
+trigger click attempted.
+
+**Confirmed live, not assumed, and the real cause was different from
+what the symptom suggested.** First checked for a shadow-DOM boundary
+(a plausible reason `document.querySelectorAll` could miss real
+elements) -- ruled out directly: the page's own `username`/`password`
+inputs sit in the plain document, not a shadow root. The actual cause:
+timing. Measured directly, repeated to be sure it wasn't a one-off:
+`document.querySelectorAll("input, textarea, select").length` reads 0
+at 400ms after Playwright's `wait_until="load"` fires, and a stable 3
+from ~500ms onward, consistently across three separate runs (a genuine
+one-time step as the page's JS finishes mounting the form, not a
+flicker -- checked with 150ms-interval polling before concluding that).
+`detect_fields()`'s fixed `page.wait_for_timeout(400)` was reading the
+DOM mid-render on this specific client-side-rendered login page and
+correctly, honestly reporting "nothing here yet" -- not a detection
+bug, a timing one.
+
+**Fix: poll instead of sleep-and-hope, both places a fixed wait
+existed.** New `_wait_for_any_field()`: checks for any
+input/textarea/select every 150ms, capped at 3000ms total, returning
+as soon as one appears. Replaces both the initial-page wait (400ms
+fixed -> adaptive) and the post-trigger-click wait (800ms fixed ->
+same adaptive helper, same reasoning: whatever page a login trigger
+navigates to can be just as client-side-rendered as the landing page
+was). A page with genuinely nothing to find spends the full 3-second
+budget before giving up -- an acceptable cost for a one-off, human-
+triggered lookup (not part of the crawl's own budget-sensitive loop).
+
+**Verified live:**
+- `account.proton.me/mail`, three consecutive runs: both `username`
+  and `password` fields found every time, `clicked_trigger: null`
+  (correct -- the form was already there, no click needed once the
+  wait was actually long enough).
+- Confirmed through the real running server's own HTTP endpoint too,
+  not just a direct function call.
+- Regression: gmail.com and saucedemo (both fast-rendering, fields
+  available well before 400ms) -- identical results to before this
+  change.
+- The original empty-landing-page-then-click scenario, re-checked on a
+  fresh local fixture: still finds and clicks the trigger, still finds
+  the real form on the page it navigates to -- confirms the
+  post-click wait replacement didn't regress the case it also covers.
+- A genuinely empty page (no fields, no trigger anywhere): degrades
+  the same way as before -- empty result, no error -- just takes up to
+  ~3.6s instead of ~0.4s, measured directly rather than assumed
+  acceptable.
