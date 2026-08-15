@@ -10,6 +10,7 @@ run list survives a server restart by re-scanning the directory.
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 import traceback
@@ -119,6 +120,41 @@ def get_run_dir(run_id: str) -> Path:
 
 def get_handle(run_id: str) -> Optional[RunHandle]:
     return _runs.get(run_id)
+
+
+def delete_run(run_id: str) -> None:
+    """Deletes a run's on-disk directory (runs/<run_id>/) and drops its
+    in-memory handle, if any -- the only run-management operation this
+    UI has at all today (Aug 2026): no pagination, no sort/filter by
+    project, found missing entirely when asked directly. Deletion was
+    the one worth building first (irreversible data hanging around
+    forever is the actual pain point; browsing a long list is milder).
+
+    Refuses a still-running crawl: `_execute()` only creates the output
+    directory *after* `crawl()` returns, so there's nothing on disk to
+    delete yet, and clearing the in-memory handle out from under a live
+    background thread would just orphan it, not stop it -- this isn't a
+    cancel feature.
+
+    project_state/ (the durable, cross-run record keyed by project name,
+    not run_id -- see M3.5) is deliberately untouched: it's meant to
+    survive any single run's deletion by design, the same way it already
+    survives a run simply aging out of the runs/ listing."""
+    with _lock:
+        handle = _runs.get(run_id)
+        if handle is not None and handle.status == "running":
+            raise ValueError("cannot delete a run that is still in progress")
+
+    out_dir = RUNS_DIR / run_id
+    existed_on_disk = out_dir.exists()
+    if existed_on_disk:
+        shutil.rmtree(out_dir)
+
+    with _lock:
+        existed_in_memory = _runs.pop(run_id, None) is not None
+
+    if not existed_on_disk and not existed_in_memory:
+        raise FileNotFoundError(f"no run '{run_id}'")
 
 
 def _read_disk_run(run_id: str, d: Path) -> Optional[dict]:

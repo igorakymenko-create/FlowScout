@@ -2009,3 +2009,52 @@ entirely) with no separate UI change needed.
   same code path as `<textarea>` by construction but not assumed
   identical without checking): `type: ""`, confirming the fix covers
   both untyped element kinds, not just the one from the bug report.
+
+## Run management: delete only (done, Aug 2026)
+
+Asked directly, checked before answering rather than assumed: does the
+operator UI have any run-management -- deleting old runs, pagination,
+sorting by something other than newest-first, grouping/filtering by
+project? None of it existed. `GET /api/runs` returns every run on disk
+in one unbounded list, sorted a single fixed way
+(`finished_at ?? started_at`, newest first, no alternative); there's a
+`DELETE /api/configs/{name}` for saved configs but no equivalent for
+runs at all -- `runs/` only ever grows.
+
+**Scoped to deletion only, deliberately, not the whole list.**
+Irreversible accumulation is the actual pain point once this gets used
+for real; browsing a long list is a milder problem, and pagination/
+sort/group-by-project have no usage data yet to size them against
+(same reasoning as the earlier infinite-scroll/pagination
+investigation above -- build the piece that's confirmed to matter,
+not the whole imagined feature set at once).
+
+**`runs.delete_run(run_id)`**: removes `runs/<run_id>/` from disk and
+drops the in-memory `RunHandle` if one's still held. Refuses a
+still-running crawl (`_execute()` only creates the output directory
+*after* `crawl()` returns, so there'd be nothing on disk to delete yet,
+and clearing the handle out from under a live background thread would
+orphan it rather than stop it -- this isn't a cancel feature).
+`project_state/` -- the durable, cross-run record keyed by project
+name, not run_id -- is deliberately untouched, the same way it already
+survives a run simply aging out of the listing on its own.
+
+`DELETE /api/runs/{run_id}` — 200 on success, 404 if the run doesn't
+exist anywhere (disk or memory), 409 if it's still running. Web UI: a
+🗑 button per run-list row (`stopPropagation` so it doesn't also select
+the run), a `confirm()` prompt, and — if the deleted run was the one
+currently open in the detail pane — the pane resets to the empty state
+rather than leaving a stale iframe pointed at a `report.html` that no
+longer exists.
+
+**Verified live, not just unit-level:** a real Playwright-style
+`flows.json` written to `runs/test-delete-me-12345/`, deleted via
+`delete_run()` directly -- directory confirmed gone. Separately, the
+actual HTTP path against a running server: created a run directory,
+confirmed it in `GET /api/runs`'s output, `curl -X DELETE
+/api/runs/live-delete-test` → `200 {"deleted": ...}`, directory gone
+from disk, run gone from the next `GET /api/runs`. `DELETE` on a
+nonexistent run id → `404` confirmed the same way. The still-running
+refusal and the not-found case were also checked directly against
+`delete_run()` (a fake `RunHandle` with `status="running"` correctly
+raises and is left in place, not removed).

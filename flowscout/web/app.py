@@ -185,6 +185,17 @@ def get_run(run_id: str):
     return info
 
 
+@app.delete("/api/runs/{run_id}")
+def delete_run(run_id: str):
+    try:
+        runs_module.delete_run(run_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "run not found") from None
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return {"deleted": run_id}
+
+
 @app.get("/api/runs/{run_id}/report", response_class=HTMLResponse)
 def get_report(run_id: str):
     path = runs_module.get_run_dir(run_id) / "report.html"

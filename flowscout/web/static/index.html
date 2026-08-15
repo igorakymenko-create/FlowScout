@@ -668,6 +668,35 @@ async function refreshRunsList() {
       <span class="meta">${r.run_id}</span>
       <span class="meta">${summary}</span>`;
     li.onclick = () => selectRun(r.run_id);
+    // Only run-management operation this UI has (Aug 2026) -- no
+    // pagination/sort/group by project yet, this was the one asked for
+    // directly: old runs accumulate on disk forever otherwise.
+    const delBtn = el('button', 'icon-btn', '🗑');
+    delBtn.type = 'button';
+    delBtn.title = 'Delete this run';
+    delBtn.style.cssText = 'position:absolute; top:6px; right:6px; font-size:11px;';
+    delBtn.onclick = async (e) => {
+      e.stopPropagation();  // don't also trigger selectRun() on the parent <li>
+      if (!confirm(`Delete run "${r.project}" (${r.run_id})? This can't be undone.`)) return;
+      const res = await fetch(`${API}/api/runs/${encodeURIComponent(r.run_id)}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        alert(`Couldn't delete: ${body.detail || res.statusText}`);
+        return;
+      }
+      if (activeRunId === r.run_id) {
+        // The detail pane was showing exactly what just got deleted --
+        // pointing an iframe at a report.html that no longer exists
+        // would just show a stale/broken view, not something to leave up.
+        activeRunId = null;
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+        document.getElementById('run-detail').innerHTML =
+          '<div class="empty-state">Start a crawl, or select a past run from the list.</div>';
+      }
+      await refreshRunsList();
+    };
+    li.style.position = 'relative';
+    li.appendChild(delBtn);
     list.appendChild(li);
   }
   return runs;
