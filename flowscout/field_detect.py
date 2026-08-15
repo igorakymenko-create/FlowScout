@@ -127,7 +127,24 @@ def detect_fields(start_url: str, timeout_ms: int = 20000) -> dict:
                 page.wait_for_timeout(400)
                 fields = page.evaluate(_FIELD_SCAN_JS)
 
-                if not any(f["type"] == "password" for f in fields):
+                # Only chase a trigger when the landing page shows NOTHING
+                # useful yet -- not just "no password field specifically".
+                # Found live on gmail.com (a real, correctly-detected
+                # single-page result: an "identifier" input, step 1 of
+                # Google's genuinely two-step sign-in, password comes on a
+                # second page after Next): the previous "no password"
+                # condition treated a real, useful, already-visible field
+                # as if the form hadn't been found yet, went looking for
+                # something to click, and (via a *separate*, also-real bug
+                # -- see _LOGIN_HREF_RE's own comment) landed on "Forgot
+                # email?" (href contains "signin" as a substring, but the
+                # link is account recovery, not login continuation),
+                # merging in a field from a completely different page. A
+                # real single- or multi-step form with at least one field
+                # already found is useful information on its own and
+                # should be reported as-is, not silently supplemented by
+                # wherever an imprecise trigger match happens to lead.
+                if not fields:
                     trigger = page.evaluate(_FIND_TRIGGER_JS, {
                         "hrefPattern": _LOGIN_HREF_RE.pattern, "textPattern": _LOGIN_TRIGGER_RE.pattern,
                     })

@@ -2058,3 +2058,54 @@ nonexistent run id → `404` confirmed the same way. The still-running
 refusal and the not-found case were also checked directly against
 `delete_run()` (a fake `RunHandle` with `status="running"` correctly
 raises and is left in place, not removed).
+
+## Detect fields: two-step login forms merged in an unrelated page (found by user report, Aug 2026)
+
+Found by a user report against gmail.com: `detect_fields()` returned
+three fields, one of them (`recoveryIdentifierId`) not from the landing
+page at all -- `clicked_trigger` was `"Forgot email?"`, a link the tool
+should never have followed.
+
+**Confirmed live, both layers, before touching anything.** Gmail's real
+landing page already has a genuine, correctly-detected field: an
+`identifier` input (step 1 of Google's own two-step sign-in -- email/
+phone first, password on a second page after "Next"). But
+`detect_fields()`'s trigger-search condition was `if not any(f["type"]
+== "password" for f in fields):` -- true here, since no password field
+exists *yet* by design, not because the form wasn't found. That
+incorrectly sent it hunting for something to click, and a second, truly
+independent bug did the rest: `_LOGIN_HREF_RE` (`log-?in|sign-?in|
+log-?on`) matched "Forgot email?" purely because its real href
+(`/signin/usernamerecovery?...`) contains "signin" as a bare substring
+-- the link is account recovery, not login continuation, but the regex
+doesn't distinguish a login-flow URL namespace from a specific
+login-continuation link inside it. The click landed on the recovery
+page, and its own field got merged (`fields = fields +
+page.evaluate(...)`, additive by design for the *original* motivating
+case) into the result alongside the real landing-page fields.
+
+**Fixed the trigger condition, not the regex.** Changed `if not
+any(password)` to `if not fields:` -- only chase a trigger when the
+landing page shows genuinely nothing useful yet, not merely "no
+password specifically." A real, already-visible field (even just step
+1 of a multi-step form) is useful information on its own and shouldn't
+be silently supplemented by wherever an imprecise trigger match happens
+to lead. The href-substring looseness in `_LOGIN_HREF_RE` is still
+real and unfixed -- it just no longer gets a chance to misfire once a
+real field has already been found, which covers this case completely
+without needing to solve the harder, fuzzier regex-precision problem
+today.
+
+**Verified live, three cases, not just the one that motivated the fix:**
+- gmail.com re-run: `clicked_trigger: null`, exactly the two real
+  landing-page fields (`identifier`, `hl`) -- no recovery-page field,
+  no bogus click.
+- The original motivating scenario (a landing page with zero visible
+  fields, real form one click away) re-checked against a local fixture
+  built to reproduce it: `clicked_trigger: "Log In"`, both
+  username/password fields found on the page it correctly navigated
+  to -- confirms the fix didn't regress the case this feature exists
+  for in the first place.
+- Regression, saucedemo's login form (both fields already on the
+  landing page, no click ever needed): unchanged, `clicked_trigger:
+  null` before and after.
