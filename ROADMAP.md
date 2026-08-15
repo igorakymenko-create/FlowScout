@@ -1965,3 +1965,47 @@ below, not assumed).
   "no `exclude_patterns` configured at all falls through to ordinary
   keyword classification unchanged") -- all passed before the live runs,
   narrowing down exactly what live verification needed to confirm.
+
+## Detect fields: fake "type" on textarea/select (found by user report, Aug 2026)
+
+Found by a user running "Detect fields from site" against google.com
+and reporting the literal output: `textarea · textarea "q"`. Confirmed
+live before touching anything -- `detect_fields('https://www.google.com/')`
+returned `{"tag": "textarea", "type": "textarea", "name": "q", ...}`,
+both fields genuinely identical.
+
+**Root cause: `_FIELD_SCAN_JS` was fabricating a `type` for elements
+that don't have one.** `<textarea>`/`<select>` have no `type` attribute
+in real HTML at all -- the scanner synthesized a stand-in (`'textarea'`
+/ `'select'`, literally echoing the tag name) so a second piece of code,
+`SKIP_TYPES.has(type)`, would have something to check for `<input>`
+elements. That stand-in then leaked straight into the reported field
+data, and the web UI's own label logic (`f.tag + (f.type ? ' · ' +
+f.type : '')`) had no way to tell a real `type` from a fabricated one --
+so a real, correctly-detected field (Google's search box genuinely is
+`<textarea name="q" id="APjFqb">`, not a detection mistake) produced a
+redundant, confusing label. Not a hypothetical: exactly the "never
+invent information you don't actually have" principle this project
+holds elsewhere (flow identity, gap analysis, risk classification) --
+this was the same mistake in a much smaller, easy-to-miss corner.
+
+**Fix:** split the stand-in (kept, local to the filter check) from what
+gets reported. A field's `type` in the output is now the real attribute
+value when one exists, `'text'` for a bare `<input>` with none (a
+genuine browser default, not a guess), and `''` for `<textarea>`/
+`<select>` -- nothing to fabricate for those. The UI's existing ternary
+already handles an empty `type` correctly (omits the `· type` suffix
+entirely) with no separate UI change needed.
+
+**Verified live, three cases:**
+- google.com re-run: `type: ""` now, no other field changed --
+  `tag`/`name`/`id`/`ariaLabel` all identical to before the fix.
+- Regression, saucedemo's login form (real `<input type="text">` /
+  `<input type="password">`): both still report their genuine, distinct
+  `type` unchanged -- confirms the fix didn't touch the case the
+  feature was originally built around (telling a username field apart
+  from a password field).
+- A local fixture page with a real `<select>` (not tested live before,
+  same code path as `<textarea>` by construction but not assumed
+  identical without checking): `type: ""`, confirming the fix covers
+  both untyped element kinds, not just the one from the bug report.

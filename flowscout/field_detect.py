@@ -29,12 +29,24 @@ _FIELD_SCAN_JS = r"""
         const style = getComputedStyle(el);
         if (r.width <= 0 || r.height <= 0 || style.visibility === 'hidden'
             || style.display === 'none' || el.disabled) continue;
-        const type = (el.getAttribute('type')
+        const rawType = el.getAttribute('type');
+        // filterType (for SKIP_TYPES below) synthesizes a stand-in for
+        // <textarea>/<select>, which have no real `type` attribute at
+        // all -- but that stand-in must never reach the reported field
+        // below. Found live on google.com's own search box (a real
+        // <textarea name="q">): echoing the tag name back as a fake
+        // `type` produced a redundant, confusing "textarea · textarea"
+        // in the UI's own label, which just concatenates tag + type.
+        const filterType = (rawType
             || (el.tagName === 'TEXTAREA' ? 'textarea' : el.tagName === 'SELECT' ? 'select' : 'text')).toLowerCase();
-        if (SKIP_TYPES.has(type)) continue;
+        if (SKIP_TYPES.has(filterType)) continue;
         out.push({
             tag: el.tagName.toLowerCase(),
-            type: type,
+            // Only a genuine `type` attribute value is reported. <input>
+            // with no explicit type genuinely defaults to text (browser
+            // behavior, not a guess) -- <textarea>/<select> get '' since
+            // they have no such attribute to report at all.
+            type: rawType ? rawType.toLowerCase() : (el.tagName === 'INPUT' ? 'text' : ''),
             name: el.getAttribute('name') || '',
             id: el.id || '',
             placeholder: el.getAttribute('placeholder') || '',
