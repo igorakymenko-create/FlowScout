@@ -37,8 +37,8 @@ dev = ["pytest>=8"]
 flowscout = "flowscout.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/PLACEHOLDER/flowscout"
-"Engineering log" = "https://github.com/PLACEHOLDER/flowscout/blob/main/ROADMAP.md"
+Homepage = "https://github.com/igorakymenko-create/FlowScout"
+"Engineering log" = "https://github.com/igorakymenko-create/FlowScout/blob/main/ROADMAP.md"
 
 [tool.setuptools.packages.find]
 include = ["flowscout*"]
