@@ -1,0 +1,779 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FlowScout — Operator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root {
+  --bg: #F6F7F9;
+  --surface: #FFFFFF;
+  --surface-alt: #EEF0F3;
+  --border: #DDE1E6;
+  --text-primary: #161A21;
+  --text-secondary: #545C68;
+  --text-tertiary: #8A919C;
+  --accent: #14647F;
+  --accent-soft-bg: #E3EEF2;
+  --sem-safe: #0F6E56; --sem-safe-bg: #E1F5EE;
+  --sem-mutating: #8A5A0B; --sem-mutating-bg: #FAEEDA;
+  --sem-destructive: #9A3B22; --sem-destructive-bg: #FAECE7;
+  --font-sans: -apple-system, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "Cascadia Mono", Consolas, "SF Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14171C; --surface: #1B1F26; --surface-alt: #20252D; --border: #2C323C;
+    --text-primary: #ECEEF1; --text-secondary: #A6AEBA; --text-tertiary: #71798A;
+    --accent: #6FC1DC; --accent-soft-bg: #17313A;
+    --sem-safe: #7FDCB9; --sem-safe-bg: #0E3B30;
+    --sem-mutating: #F0BE6B; --sem-mutating-bg: #40300D;
+    --sem-destructive: #F2A488; --sem-destructive-bg: #46201A;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14171C; --surface: #1B1F26; --surface-alt: #20252D; --border: #2C323C;
+  --text-primary: #ECEEF1; --text-secondary: #A6AEBA; --text-tertiary: #71798A;
+  --accent: #6FC1DC; --accent-soft-bg: #17313A;
+  --sem-safe: #7FDCB9; --sem-safe-bg: #0E3B30;
+  --sem-mutating: #F0BE6B; --sem-mutating-bg: #40300D;
+  --sem-destructive: #F2A488; --sem-destructive-bg: #46201A;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+body {
+  background: var(--bg); color: var(--text-primary); font-family: var(--font-sans);
+  font-size: 14.5px; line-height: 1.55;
+}
+.app { display: grid; grid-template-columns: 380px 1fr; height: 100vh; }
+@media (max-width: 900px) { .app { grid-template-columns: 1fr; height: auto; } }
+
+.sidebar { border-right: 1px solid var(--border); overflow-y: auto; padding: 1.25rem; background: var(--surface); }
+.main { overflow-y: auto; padding: 1.5rem 2rem; }
+
+.brand { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.25rem; }
+.brand h1 { font-size: 16px; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+.badge { font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 99px; }
+.badge-ok { background: var(--sem-safe-bg); color: var(--sem-safe); }
+.badge-warn { background: var(--sem-mutating-bg); color: var(--sem-mutating); }
+
+h2 { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--text-secondary); margin: 1.5rem 0 .6rem; display: flex; align-items: center; justify-content: space-between; }
+h2:first-of-type { margin-top: 0; }
+.help-trigger { width: 20px; height: 20px; padding: 0; border-radius: 50%; font-size: 11px; text-transform: none; letter-spacing: 0; font-weight: 700; }
+
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 2rem; }
+.modal { background: var(--surface); border-radius: 12px; max-width: 640px; width: 100%; max-height: 85vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+.modal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.modal-header h3 { margin: 0; font-size: 15px; font-weight: 700; }
+.modal-body { padding: 4px 20px 20px; overflow-y: auto; font-size: 13px; line-height: 1.6; }
+.modal-body h4 { font-size: 13px; font-weight: 700; margin: 1.1rem 0 .3rem; color: var(--accent); }
+.modal-body h4:first-child { margin-top: 1rem; }
+.modal-body p { margin: 0 0 .5rem; color: var(--text-secondary); }
+.modal-body code { font-family: var(--font-mono); background: var(--surface-alt); padding: 1px 5px; border-radius: 4px; font-size: 12px; color: var(--text-primary); }
+.modal-body table { width: 100%; border-collapse: collapse; margin: .4rem 0 .8rem; font-size: 12.5px; }
+.modal-body th, .modal-body td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+.modal-body th { color: var(--text-tertiary); font-weight: 600; }
+
+label { display: block; font-size: 12px; font-weight: 600; color: var(--text-secondary); margin: 10px 0 4px; }
+label:first-child { margin-top: 0; }
+input[type=text], input[type=url], input[type=number], select {
+  width: 100%; padding: 7px 9px; font-size: 13px; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--bg); color: var(--text-primary); font-family: inherit;
+}
+input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.check-row { display: flex; align-items: center; gap: 7px; margin: 10px 0; font-size: 13px; }
+.check-row label { margin: 0; font-weight: 500; color: var(--text-primary); }
+.hint { font-size: 11px; color: var(--text-tertiary); margin-top: 3px; }
+.mono { font-family: var(--font-mono); }
+
+.kv-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 6px; margin-bottom: 6px; }
+.kv-row input { width: 100%; }
+.link-btn { background: none; border: none; color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; padding: 2px 0; }
+.icon-btn { background: var(--surface-alt); border: 1px solid var(--border); border-radius: 6px; color: var(--text-tertiary); cursor: pointer; font-size: 13px; width: 28px; }
+.detect-fields-list { border: 1px solid var(--border); border-radius: 8px; margin: 6px 0; overflow: hidden; }
+.detect-field-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; font-size: 12px; border-bottom: 1px solid var(--border); }
+.detect-field-row:last-child { border-bottom: none; }
+.detect-field-row .link-btn { flex-shrink: 0; }
+.persona-block { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 8px; background: var(--surface-alt); }
+.persona-header { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.persona-header input { flex: 1; font-weight: 600; }
+
+button.primary {
+  width: 100%; margin-top: 1.5rem; padding: 10px; font-size: 13.5px; font-weight: 700;
+  background: var(--accent); color: #fff; border: none; border-radius: 8px; cursor: pointer;
+}
+button.primary:disabled { opacity: .5; cursor: default; }
+button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+
+.runs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.run-item {
+  display: flex; flex-direction: column; gap: 2px; padding: 9px 10px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface); cursor: pointer;
+}
+.run-item:hover { border-color: var(--accent); }
+.run-item.active { border-color: var(--accent); background: var(--accent-soft-bg); }
+.run-item .top { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.run-item .name { font-weight: 600; font-size: 13px; }
+.run-item .meta { font-size: 11px; color: var(--text-tertiary); }
+.status-pill { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 99px; text-transform: uppercase; letter-spacing: .03em; }
+.status-running { background: var(--sem-mutating-bg); color: var(--sem-mutating); }
+.status-done { background: var(--sem-safe-bg); color: var(--sem-safe); }
+.status-error { background: var(--sem-destructive-bg); color: var(--sem-destructive); }
+
+.empty-state { color: var(--text-tertiary); font-size: 13.5px; text-align: center; padding: 4rem 1rem; }
+.report-frame { width: 100%; height: calc(100vh - 3rem); border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+
+.gap-upload-section { margin-bottom: 1rem; }
+.gap-upload-section h3 { margin: 0 0 4px; font-size: 14px; color: var(--text-primary); }
+.gap-upload-section .hint { margin-bottom: 8px; max-width: 640px; }
+.gap-upload { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.gap-upload input[type=file] { font-size: 12px; }
+.gap-upload input[type=number] { width: 90px; }
+button.secondary {
+  padding: 7px 12px; font-size: 12.5px; font-weight: 600; background: var(--surface-alt);
+  color: var(--text-primary); border: 1px solid var(--border); border-radius: 7px; cursor: pointer;
+}
+.error-box { background: var(--sem-destructive-bg); color: var(--sem-destructive); border-radius: 8px; padding: 10px 12px; font-size: 12.5px; white-space: pre-wrap; font-family: var(--font-mono); margin-top: .75rem; max-height: 300px; overflow: auto; }
+.main-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; gap: 12px; flex-wrap: wrap; }
+.main-header h2 { margin: 0; font-size: 15px; text-transform: none; letter-spacing: 0; color: var(--text-primary); }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <h1>🧭 FlowScout</h1>
+      <span id="key-badges" style="display:flex; gap:4px; flex-wrap:wrap;"></span>
+    </div>
+
+    <h2>New run <button type="button" class="icon-btn help-trigger" id="help-btn" title="How these settings work">?</button></h2>
+    <label for="f-load">Load saved config</label>
+    <div style="display:flex; gap:6px;">
+      <select id="f-load" style="flex:1"><option value="">— blank —</option></select>
+      <button type="button" class="icon-btn" id="f-load-delete" title="Delete selected config" disabled>🗑</button>
+    </div>
+    <button type="button" class="link-btn" id="f-save-as">Save current settings as…</button>
+
+    <label for="f-project">Project name</label>
+    <input id="f-project" type="text" placeholder="my-site">
+
+    <label for="f-url">Start URL</label>
+    <input id="f-url" type="url" placeholder="https://example.com/">
+
+    <h2>Credentials</h2>
+    <div id="f-creds"></div>
+    <button type="button" class="link-btn" id="f-creds-add">+ add field</button>
+    <button type="button" class="link-btn" id="f-detect-fields">🔍 Detect fields from site</button>
+    <p class="hint">Field names below have to match a site's own form attributes (see <span class="mono">?</span>) — this visits the Start URL and shows the real ones instead of guessing.</p>
+    <div id="f-detect-results"></div>
+
+    <h2>Additional personas <button type="button" class="icon-btn help-trigger" data-help="personas" title="How multi-persona crawling works">?</button></h2>
+    <p class="hint">The Credentials above are the "default" persona. Add more to crawl the same site again as different logged-in users (e.g. admin vs. standard user), sequentially, in one run — see the <span class="mono">?</span>.</p>
+    <div id="f-personas"></div>
+    <button type="button" class="link-btn" id="f-persona-add">+ add persona</button>
+
+    <h2>Limits</h2>
+    <div class="row2">
+      <div><label for="f-depth">Max depth</label><input id="f-depth" type="number" value="4" min="1"></div>
+      <div><label for="f-breadth">Max breadth/state</label><input id="f-breadth" type="number" value="8" min="1"></div>
+      <div><label for="f-states">Max states</label><input id="f-states" type="number" value="30" min="1"></div>
+      <div><label for="f-flows">Max flows</label><input id="f-flows" type="number" value="50" min="1"></div>
+      <div><label for="f-action-repeat">Max repeats of the same action</label><input id="f-action-repeat" type="number" value="2" min="1"
+        title="Caps how many times the same normalized action (e.g. &quot;add to cart&quot; on different products) can be followed within one flow. A third repeat rarely teaches the crawler anything a second one didn't -- this bounds the combinatorial state growth that repeated mutating actions cause (an N-item cart is up to 2^N reachable states) without a blanket depth limit."></div>
+    </div>
+
+    <h2>Safety</h2>
+    <div class="check-row">
+      <input type="checkbox" id="f-mutating">
+      <label for="f-mutating">Allow mutating actions (add-to-cart, checkout, submit…)</label>
+    </div>
+    <label for="f-domains">Allowed domains (comma-separated)</label>
+    <input id="f-domains" type="text" placeholder="example.com">
+    <label for="f-exclude">Exclude URL patterns (comma-separated, glob)</label>
+    <input id="f-exclude" type="text" placeholder="*/privacy*, */terms*">
+    <p class="hint">Matched pages are treated as destructive — never visited, regardless of the toggle above.</p>
+
+    <h2>Embeddings provider <button type="button" class="icon-btn help-trigger" data-help="embeddings-provider" title="What this affects and what 'unverified' means">?</button></h2>
+    <p class="hint">Used by both Semantic dedup and Gap analysis below — one choice for both, since a run only ever picks one provider. Only providers with a key set (see badges above) will actually work.</p>
+    <label for="f-embeddings-provider">Provider</label>
+    <select id="f-embeddings-provider"></select>
+
+    <h2>Semantic dedup</h2>
+    <div class="check-row">
+      <input type="checkbox" id="f-semantic" checked>
+      <label for="f-semantic">Enabled (needs an embeddings provider key, see above)</label>
+    </div>
+    <label for="f-threshold">Similarity threshold</label>
+    <input id="f-threshold" type="number" value="0.95" min="0" max="1" step="0.01">
+    <p class="hint">This default (0.95) was calibrated for Gemini specifically. If you pick a different provider above, treat this number as a starting guess, not a verified value — see the provider help (<span class="mono">?</span>).</p>
+
+    <h2>Gap analysis <span class="hint" style="font-weight:400;">(optional)</span></h2>
+    <p class="hint">Attach a TCMS export now so this run's report has flows AND gap analysis together as soon as it finishes — no second step after. Leave empty to just crawl; a TCMS can still be uploaded afterward from a run's detail page.</p>
+    <label for="f-tcms">TCMS CSV</label>
+    <input id="f-tcms" type="file" accept=".csv">
+    <label for="f-gap-threshold">Gap threshold</label>
+    <input id="f-gap-threshold" type="number" min="0" max="1" step="0.01" placeholder="default">
+
+    <button class="primary" id="f-submit">Start crawl</button>
+    <div id="f-error" class="error-box" style="display:none"></div>
+  </aside>
+
+  <main class="main" id="main">
+    <div class="main-header">
+      <h2>Runs</h2>
+    </div>
+    <div style="display:flex; gap:1.5rem; align-items:flex-start;">
+      <ul class="runs-list" id="runs-list" style="flex: 0 0 260px;"></ul>
+      <div style="flex:1; min-width:0;" id="run-detail">
+        <div class="empty-state">Start a crawl, or select a past run from the list.</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="modal-overlay" id="help-overlay" style="display:none">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>How these settings work</h3>
+      <button type="button" class="icon-btn" id="help-close">×</button>
+    </div>
+    <div class="modal-body">
+      <p>Every candidate action the crawler finds gets one of three risk tiers before it's ever clicked. This is what most fields below actually control.</p>
+      <table>
+        <tr><th>Tier</th><th>Meaning</th><th>Followed?</th></tr>
+        <tr><td><b>safe</b></td><td>navigation — links, opening menus, viewing pages</td><td>always</td></tr>
+        <tr><td><b>mutating</b></td><td>changes state — add to cart, checkout, submit, purchase…</td><td>only if <code>allow_mutating</code> is on</td></tr>
+        <tr><td><b>destructive</b></td><td>logout, leaving the allowed domain(s), an excluded page</td><td>never — no toggle overrides this</td></tr>
+      </table>
+
+      <h4>Load saved config</h4>
+      <p>Prefills every field below from a JSON file in <code>configs/</code>. There's no limit on how many you can save — it's just files in a folder. Selecting <b>— blank —</b> resets the form to defaults. <b>Save current settings as…</b> writes the form to a new (or overwritten) file; the 🗑 button next to the dropdown deletes the selected one. All of this is also just editable by hand in <code>configs/*.json</code> if you prefer a text editor.</p>
+
+      <h4>Project name</h4>
+      <p>A label only — names the run's folder (<code>runs/&lt;project&gt;-&lt;timestamp&gt;-&lt;id&gt;</code>) and how it shows up in the list. No effect on crawl behavior.</p>
+
+      <h4>Start URL</h4>
+      <p>Where the crawl begins. Everything discovered has to be reachable by following links from here.</p>
+
+      <h4>Credentials</h4>
+      <p>Field-name → value pairs. When the crawler finds a form (e.g. a login page), it fills each input by matching the input's <code>name</code>/<code>id</code>/<code>placeholder</code> against these keys — case-insensitive, substring match. So a key of <code>user-name</code> also matches an input literally named <code>username</code>. Fields that don't match anything get a synthetic safe value instead (e.g. <code>flowscout_test</code>) — never left blank, never guessed from the page.</p>
+
+      <h4 id="help-personas">Additional personas</h4>
+      <p>Crawls the same site again as a different logged-in user, one persona after another (not in parallel — two personas can corrupt each other's results through shared server-side state, e.g. one resetting cart contents mid-crawl while another is still using them), all written into <b>one</b> report. Flows are kept separate per persona even when they look identical otherwise — an admin-only page an admin can reach and a standard user can't never collapses into "the same flow" just because the destination matches. Each persona gets the same Max states / Max flows budget the crawl would give a single persona, not a shared pool that a later persona could get starved out of. Leave this empty to crawl as just the one persona defined in Credentials above (the default, and the only behavior before this existed).</p>
+
+      <h4>Max depth</h4>
+      <p>The longest chain of steps a single flow can take from the start page. Doesn't limit how many different flows get explored — only how deep any one of them goes.</p>
+
+      <h4>Max breadth / state</h4>
+      <p>How many candidate actions the crawler will try from one discovered page, out of everything it finds there. Extras beyond this are skipped ("breadth limit exceeded" in the report) — in practice the most common reason a real, visible button never gets clicked, especially when a site's header/footer repeats on every page and crowds out page-specific content ahead of it. Raise this if a run's report shows a lot of breadth-limit skips on pages you care about.</p>
+
+      <h4>Max states / Max flows</h4>
+      <p>Whole-run budgets: total distinct application states discovered, and total paths walked (unique + duplicate together), before the crawl stops.</p>
+
+      <h4>Allow mutating actions</h4>
+      <p>Off by default. When off, only <b>safe</b> actions are ever clicked. Turn this on when you're fine with the crawler actually performing add-to-cart/checkout/submit-style actions on the target — safe on a demo/QA site with fake data, risky on a site with a real payment processor wired up.</p>
+
+      <h4>Allowed domains</h4>
+      <p>The crawl never navigates outside these domains, regardless of the toggle above — anything pointing elsewhere is <b>destructive</b> and skipped, no exceptions.</p>
+
+      <h4>Exclude URL patterns</h4>
+      <p>Glob patterns (e.g. <code>*/privacy*</code>) for pages you never want visited — legal pages, social links, anything not worth the crawl budget or not safe to touch. Same treatment as an external domain: always <b>destructive</b>, independent of the mutating toggle. Doesn't apply to in-page anchors (e.g. <code>#faq</code>) — only real page navigations have a path to match against.</p>
+
+      <h4 id="help-embeddings-provider">Embeddings provider</h4>
+      <p>Both Semantic dedup and Gap analysis need a text-embeddings API call to compare flows/test cases by meaning, not just exact text. Gemini was the only option originally; OpenAI and Voyage AI (Anthropic's own recommended embeddings partner — Anthropic has no embeddings model of its own) were added so an operator without a Gemini key isn't stuck. <b>Gemini's integration is the one that's actually been exercised against real API calls, repeatedly, throughout this project's development. OpenAI's and Voyage's were built from each provider's documented API contract without a live key to test against — the ⚠ on their badge above means exactly that: verify with a real key before trusting the results, the same discipline every other feature here was held to.</b> The 0.95 (dedup) and 0.74 (gap analysis) thresholds below were both measured empirically against Gemini's own similarity distribution; a different provider's embedding space won't necessarily cluster the same way at the same numbers.</p>
+
+      <h4>Semantic dedup — Enabled</h4>
+      <p>An extra pass after the crawl (needs a key for whichever provider you picked above) that merges flows reading as the same thing even when their exact steps differ. Off by default cost, and the run still fully works without it — just structural + state-convergence dedup only, both free and always on regardless of this setting.</p>
+
+      <h4>Semantic dedup — Similarity threshold</h4>
+      <p>How similar two flows' embeddings must be (cosine, 0–1) before they're called duplicates. Higher = stricter, fewer merges. The 0.95 default was set by testing real flow pairs against Gemini during development, not picked blind — lower thresholds were shown to merge flows that don't even end in the same application state. Not re-verified for OpenAI/Voyage — see Embeddings provider above.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let activeRunId = null;
+let pollTimer = null;
+let credRowCount = 0;
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function addCredRow(k = '', v = '', wrap = null) {
+  wrap = wrap || document.getElementById('f-creds');
+  const row = el('div', 'kv-row');
+  const kIn = el('input'); kIn.type = 'text'; kIn.placeholder = 'field name (e.g. user-name)'; kIn.value = k;
+  const vIn = el('input'); vIn.type = 'text'; vIn.placeholder = 'value'; vIn.value = v;
+  const rm = el('button', 'icon-btn', '×'); rm.type = 'button';
+  rm.onclick = () => row.remove();
+  row.append(kIn, vIn, rm);
+  wrap.appendChild(row);
+}
+document.getElementById('f-creds-add').onclick = () => addCredRow();
+addCredRow();
+
+function addPersonaBlock(name = '', creds = {}) {
+  const wrap = document.getElementById('f-personas');
+  const block = el('div', 'persona-block');
+
+  const header = el('div', 'persona-header');
+  const nameIn = el('input'); nameIn.type = 'text'; nameIn.placeholder = 'persona name (e.g. admin)'; nameIn.value = name;
+  nameIn.classList.add('persona-name');
+  const rm = el('button', 'icon-btn', '×'); rm.type = 'button';
+  rm.onclick = () => block.remove();
+  header.append(nameIn, rm);
+  block.appendChild(header);
+
+  const credsWrap = el('div', 'persona-creds');
+  block.appendChild(credsWrap);
+  const entries = Object.entries(creds);
+  if (entries.length === 0) addCredRow('', '', credsWrap);
+  else entries.forEach(([k, v]) => addCredRow(k, v, credsWrap));
+
+  const addFieldBtn = el('button', 'link-btn', '+ add field'); addFieldBtn.type = 'button';
+  addFieldBtn.onclick = () => addCredRow('', '', credsWrap);
+  block.appendChild(addFieldBtn);
+
+  wrap.appendChild(block);
+}
+document.getElementById('f-persona-add').onclick = () => addPersonaBlock();
+
+document.getElementById('f-detect-fields').onclick = async () => {
+  const url = document.getElementById('f-url').value.trim();
+  const btn = document.getElementById('f-detect-fields');
+  const out = document.getElementById('f-detect-results');
+  if (!url) { alert('Enter a Start URL first.'); return; }
+  btn.disabled = true; btn.textContent = 'Detecting…';
+  out.innerHTML = '';
+  try {
+    const res = await fetch(API + '/api/detect-fields', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({start_url: url}),
+    });
+    const data = await res.json();
+    if (data.error) {
+      out.appendChild(el('p', 'hint', `Could not load the page: ${data.error}`));
+    } else if (!data.fields.length) {
+      out.appendChild(el('p', 'hint', 'No visible form fields found on this page'
+        + (data.clicked_trigger ? ` (tried clicking "${data.clicked_trigger}" too).` : '.')));
+    } else {
+      if (data.clicked_trigger) {
+        out.appendChild(el('p', 'hint', `Found after clicking "${data.clicked_trigger}":`));
+      }
+      const list = el('div', 'detect-fields-list');
+      for (const f of data.fields) {
+        const attr = f.name || f.id || f.placeholder;
+        const row = el('div', 'detect-field-row');
+        const parts = [f.tag + (f.type ? ' · ' + f.type : ''),
+                        attr ? `"${attr}"` : '(no name/id/placeholder — not usable as a field name)'];
+        row.appendChild(el('span', 'mono', parts.join('  ')));
+        if (attr) {
+          const addBtn = el('button', 'link-btn', '+ use');
+          addBtn.type = 'button';
+          addBtn.onclick = () => {
+            addCredRow(attr, '');
+            addBtn.textContent = 'added ✓';
+            addBtn.disabled = true;
+          };
+          row.appendChild(addBtn);
+        }
+        list.appendChild(row);
+      }
+      out.appendChild(list);
+    }
+  } catch (e) {
+    out.appendChild(el('p', 'hint', `Detect failed: ${e}`));
+  } finally {
+    btn.disabled = false; btn.textContent = '🔍 Detect fields from site';
+  }
+};
+
+// Served by the backend, never hardcoded here -- see /api/status.
+let GAP_DEFAULT_THRESHOLD = null;
+// {name: {configured, key_env, model_name, verified_live}} -- populated
+// by loadStatus(), read by the New Run form's embeddings-provider picker
+// so it can show which provider(s) actually have a key set, not just
+// list names blindly.
+let EMBEDDINGS_PROVIDERS = {};
+
+async function loadStatus() {
+  const r = await fetch(API + '/api/status').then(r => r.json());
+  EMBEDDINGS_PROVIDERS = r.embeddings_providers || {};
+  const row = document.getElementById('key-badges');
+  row.innerHTML = '';
+  // One badge per known embeddings provider, not just Gemini -- an
+  // operator on Anthropic (no Gemini key by default) or a local model
+  // needs to see at a glance which provider they actually have configured.
+  for (const [name, info] of Object.entries(EMBEDDINGS_PROVIDERS)) {
+    const b = document.createElement('span');
+    const label = name.charAt(0).toUpperCase() + name.slice(1);
+    b.className = 'badge ' + (info.configured ? 'badge-ok' : 'badge-warn');
+    b.textContent = label + (info.configured ? ': set' : ': not set');
+    if (!info.verified_live) {
+      b.title = 'This provider\'s integration was built without live API access and has not been ' +
+                'exercised against a real call -- verify before relying on it (see ROADMAP.md).';
+      b.textContent += ' ⚠';
+    }
+    row.appendChild(b);
+  }
+  if (typeof r.gap_default_threshold === 'number') {
+    GAP_DEFAULT_THRESHOLD = r.gap_default_threshold;
+  }
+  populateProviderSelect();
+}
+
+// Options come from the backend's own provider registry (embeddings.py),
+// not a hardcoded list here -- adding a provider server-side is enough,
+// this picks it up automatically. Each option's label notes when a
+// provider has no key configured or hasn't been verified against a real
+// call yet, so the choice is informed, not a blind name pick.
+function populateProviderSelect() {
+  const sel = document.getElementById('f-embeddings-provider');
+  const prevValue = sel.value;
+  sel.innerHTML = '';
+  for (const [name, info] of Object.entries(EMBEDDINGS_PROVIDERS)) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    let label = name.charAt(0).toUpperCase() + name.slice(1);
+    if (!info.configured) label += ' (no key set)';
+    if (!info.verified_live) label += ' — unverified integration';
+    opt.textContent = label;
+    sel.appendChild(opt);
+  }
+  if (prevValue && [...sel.options].some(o => o.value === prevValue)) sel.value = prevValue;
+}
+
+async function loadConfigs(selectName) {
+  const list = await fetch(API + '/api/configs').then(r => r.json());
+  const sel = document.getElementById('f-load');
+  sel.innerHTML = '';
+  sel.appendChild(el('option', null, '— blank —'));
+  sel.firstChild.value = '';
+  for (const c of list) {
+    const opt = el('option', null, c.name);
+    opt.value = c.name;
+    opt._config = c.config;
+    sel.appendChild(opt);
+  }
+  sel.value = selectName || '';
+  document.getElementById('f-load-delete').disabled = !sel.value;
+}
+
+document.getElementById('f-load').onchange = () => {
+  const sel = document.getElementById('f-load');
+  const opt = sel.selectedOptions[0];
+  document.getElementById('f-load-delete').disabled = !sel.value;
+  // Selecting "blank" used to silently do nothing, leaving whatever was
+  // typed before still sitting in the form -- looked like the reset
+  // didn't work, because it didn't.
+  if (opt && opt._config) fillForm(opt._config); else resetForm();
+};
+
+document.getElementById('f-load-delete').onclick = async () => {
+  const sel = document.getElementById('f-load');
+  const name = sel.value;
+  if (!name) return;
+  if (!confirm(`Delete saved config "${name}"? This can't be undone.`)) return;
+  await fetch(`${API}/api/configs/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  await loadConfigs();
+  resetForm();
+};
+
+document.getElementById('f-save-as').onclick = async () => {
+  const name = prompt('Save current settings as (letters, numbers, - and _ only):');
+  if (!name) return;
+  const cfg = collectConfig();
+  const res = await fetch(`${API}/api/configs/${encodeURIComponent(name)}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg),
+  });
+  if (!res.ok) { alert('Could not save: ' + await res.text()); return; }
+  const { name: savedName } = await res.json();
+  await loadConfigs(savedName);
+};
+
+function resetForm() {
+  document.getElementById('f-project').value = '';
+  document.getElementById('f-url').value = '';
+  document.getElementById('f-creds').innerHTML = '';
+  addCredRow();
+  document.getElementById('f-personas').innerHTML = '';
+  document.getElementById('f-depth').value = 4;
+  document.getElementById('f-breadth').value = 8;
+  document.getElementById('f-states').value = 30;
+  document.getElementById('f-flows').value = 50;
+  document.getElementById('f-action-repeat').value = 2;
+  document.getElementById('f-mutating').checked = false;
+  document.getElementById('f-domains').value = '';
+  document.getElementById('f-exclude').value = '';
+  document.getElementById('f-embeddings-provider').value = 'gemini';
+  document.getElementById('f-semantic').checked = true;
+  document.getElementById('f-threshold').value = 0.95;
+  // File inputs can't be set programmatically (browser security) -- this
+  // just clears whatever was previously chosen, same as every other field.
+  document.getElementById('f-tcms').value = '';
+  document.getElementById('f-gap-threshold').value = '';
+}
+
+function fillForm(cfg) {
+  document.getElementById('f-project').value = cfg.project || '';
+  document.getElementById('f-url').value = cfg.start_url || '';
+  document.getElementById('f-creds').innerHTML = '';
+  document.getElementById('f-personas').innerHTML = '';
+  // A saved "personas" list's first entry is the base/default persona --
+  // it fills the Credentials section, same as a plain "credentials"
+  // config always has. Any further entries become Additional persona
+  // blocks. A config with no "personas" at all (everything before this
+  // feature existed) falls back to plain "credentials", unchanged.
+  const personas = cfg.personas && cfg.personas.length ? cfg.personas : null;
+  const baseCreds = personas ? (personas[0].credentials || {}) : (cfg.credentials || {});
+  const baseEntries = Object.entries(baseCreds);
+  if (baseEntries.length === 0) addCredRow(); else baseEntries.forEach(([k, v]) => addCredRow(k, v));
+  if (personas) {
+    for (const p of personas.slice(1)) addPersonaBlock(p.name || '', p.credentials || {});
+  }
+  const limits = cfg.limits || {};
+  document.getElementById('f-depth').value = limits.max_depth ?? 4;
+  document.getElementById('f-breadth').value = limits.max_breadth_per_state ?? 8;
+  document.getElementById('f-states').value = limits.max_states ?? 30;
+  document.getElementById('f-flows').value = limits.max_flows ?? 50;
+  document.getElementById('f-action-repeat').value = limits.max_action_repeat ?? 2;
+  document.getElementById('f-mutating').checked = !!cfg.allow_mutating;
+  document.getElementById('f-domains').value = (cfg.allowed_domains || []).join(', ');
+  document.getElementById('f-exclude').value = (cfg.exclude_patterns || []).join(', ');
+  document.getElementById('f-embeddings-provider').value = cfg.embeddings_provider || 'gemini';
+  const sem = cfg.semantic_dedup || {};
+  document.getElementById('f-semantic').checked = sem.enabled !== false;
+  document.getElementById('f-threshold').value = sem.threshold ?? 0.95;
+  // Saved configs never carry a TCMS file -- there's no sensible way to
+  // persist a file inside a JSON config, and the CLI's own --tcms is a
+  // per-invocation flag too, not part of the saved config shape. Clear
+  // rather than leave a stale file from before attached to a config it
+  // has nothing to do with.
+  document.getElementById('f-tcms').value = '';
+  document.getElementById('f-gap-threshold').value = '';
+}
+
+function collectConfig() {
+  const credentials = {};
+  document.querySelectorAll('#f-creds .kv-row').forEach(row => {
+    const [kIn, vIn] = row.querySelectorAll('input');
+    if (kIn.value.trim()) credentials[kIn.value.trim()] = vIn.value;
+  });
+
+  // Only emit "personas" (and skip the plain "credentials" key) when at
+  // least one Additional persona block actually exists -- keeps the
+  // payload identical to the pre-multi-persona shape for the common
+  // single-login case, rather than always sending a 1-item personas
+  // array nothing downstream needs.
+  const personaBlocks = [...document.querySelectorAll('#f-personas .persona-block')];
+  let personas = undefined;
+  if (personaBlocks.length > 0) {
+    personas = [{name: 'default', credentials}];
+    personaBlocks.forEach((block, i) => {
+      const name = block.querySelector('.persona-name').value.trim() || `persona-${i + 1}`;
+      const creds = {};
+      block.querySelectorAll('.persona-creds .kv-row').forEach(row => {
+        const [kIn, vIn] = row.querySelectorAll('input');
+        if (kIn.value.trim()) creds[kIn.value.trim()] = vIn.value;
+      });
+      personas.push({name, credentials: creds});
+    });
+  }
+
+  const splitList = (s) => s.split(',').map(x => x.trim()).filter(Boolean);
+  return {
+    project: document.getElementById('f-project').value.trim() || 'run',
+    start_url: document.getElementById('f-url').value.trim(),
+    ...(personas ? {personas} : {credentials}),
+    limits: {
+      max_depth: Number(document.getElementById('f-depth').value) || 4,
+      max_breadth_per_state: Number(document.getElementById('f-breadth').value) || 8,
+      max_states: Number(document.getElementById('f-states').value) || 30,
+      max_flows: Number(document.getElementById('f-flows').value) || 50,
+      max_action_repeat: Number(document.getElementById('f-action-repeat').value) || 2,
+    },
+    allow_mutating: document.getElementById('f-mutating').checked,
+    allowed_domains: splitList(document.getElementById('f-domains').value),
+    exclude_patterns: splitList(document.getElementById('f-exclude').value),
+    embeddings_provider: document.getElementById('f-embeddings-provider').value || 'gemini',
+    semantic_dedup: {
+      enabled: document.getElementById('f-semantic').checked,
+      threshold: Number(document.getElementById('f-threshold').value) || 0.95,
+    },
+  };
+}
+
+document.getElementById('f-submit').onclick = async () => {
+  const errBox = document.getElementById('f-error');
+  errBox.style.display = 'none';
+  const cfg = collectConfig();
+  if (!cfg.start_url) { errBox.textContent = 'Start URL is required.'; errBox.style.display = 'block'; return; }
+  const btn = document.getElementById('f-submit');
+  btn.disabled = true; btn.textContent = 'Starting…';
+  try {
+    // Plain JSON when no TCMS is attached -- unchanged from before, and
+    // still exactly what a script hitting this endpoint directly (no
+    // browser, no file to attach) would naturally send. Multipart only
+    // when there's an actual file to carry alongside the config.
+    const tcmsFile = document.getElementById('f-tcms').files[0];
+    let res;
+    if (tcmsFile) {
+      const form = new FormData();
+      form.append('config', JSON.stringify(cfg));
+      form.append('tcms', tcmsFile);
+      const gapThreshold = document.getElementById('f-gap-threshold').value;
+      if (gapThreshold !== '') form.append('gap_threshold', gapThreshold);
+      res = await fetch(API + '/api/runs', { method: 'POST', body: form });
+    } else {
+      res = await fetch(API + '/api/runs', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg),
+      });
+    }
+    if (!res.ok) throw new Error(await res.text());
+    const { run_id } = await res.json();
+    await refreshRunsList();
+    selectRun(run_id);
+  } catch (e) {
+    errBox.textContent = 'Failed to start run: ' + e.message;
+    errBox.style.display = 'block';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Start crawl';
+  }
+};
+
+function statusPillHtml(status) {
+  const cls = status === 'running' ? 'status-running' : status === 'error' ? 'status-error' : 'status-done';
+  return `<span class="status-pill ${cls}">${status}</span>`;
+}
+
+async function refreshRunsList() {
+  const runs = await fetch(API + '/api/runs').then(r => r.json());
+  const list = document.getElementById('runs-list');
+  list.innerHTML = '';
+  if (runs.length === 0) {
+    list.innerHTML = '<li class="empty-state" style="padding:1rem 0;">No runs yet.</li>';
+    return;
+  }
+  for (const r of runs) {
+    const li = el('li', 'run-item' + (r.run_id === activeRunId ? ' active' : ''));
+    const summary = r.summary ? `${r.summary.flows_unique ?? '?'} unique / ${r.summary.states_discovered ?? '?'} states` : '';
+    li.innerHTML = `
+      <div class="top"><span class="name">${r.project}</span>${statusPillHtml(r.status)}</div>
+      <span class="meta">${r.run_id}</span>
+      <span class="meta">${summary}</span>`;
+    li.onclick = () => selectRun(r.run_id);
+    list.appendChild(li);
+  }
+  return runs;
+}
+
+function renderGapUploadUI(runId, hasGapAnalysis) {
+  // Previously just a bare file input + button sitting directly above the
+  // report iframe, no heading, no explanation -- easy to miss entirely
+  // unless you already knew it was there (found via a user not finding it).
+  const section = el('div', 'gap-upload-section');
+  section.appendChild(el('h3', null, hasGapAnalysis ? 'Gap analysis vs TCMS' : 'Compare against your test plan'));
+  section.appendChild(el('p', 'hint', hasGapAnalysis
+    ? 'This run already has a gap analysis (see the report below). Upload a different CSV, or re-run with a new threshold, to replace it.'
+    : 'Upload a CSV export of your test plan (TestRail, Xray, Zephyr, or any export with an id/title/steps-shaped column) to see which discovered flows aren\'t covered by any existing test case, and which test cases don\'t match anything the crawl found.'));
+
+  const wrap = el('div', 'gap-upload');
+  const fileIn = el('input'); fileIn.type = 'file'; fileIn.accept = '.csv'; fileIn.id = 'gap-file';
+  const threshIn = el('input'); threshIn.type = 'number'; threshIn.step = '0.01'; threshIn.min = '0'; threshIn.max = '1';
+  // Left empty (and omitted from the POST) if status hasn't loaded yet, so
+  // the backend applies its own default rather than a stale copy of it.
+  if (GAP_DEFAULT_THRESHOLD !== null) threshIn.value = String(GAP_DEFAULT_THRESHOLD);
+  const btn = el('button', 'secondary', hasGapAnalysis ? 'Re-run gap analysis' : 'Run gap analysis vs TCMS');
+  btn.type = 'button';
+  const btnLabel = () => hasGapAnalysis ? 'Re-run gap analysis' : 'Run gap analysis vs TCMS';
+  btn.onclick = async () => {
+    if (!fileIn.files[0]) { alert('Choose a TCMS CSV first.'); return; }
+    btn.disabled = true; btn.textContent = 'Analyzing…';
+    const form = new FormData();
+    form.append('tcms', fileIn.files[0]);
+    if (threshIn.value !== '') form.append('threshold', threshIn.value);
+    try {
+      const res = await fetch(`${API}/api/runs/${runId}/gap`, { method: 'POST', body: form });
+      if (!res.ok) throw new Error(await res.text());
+      await showRunDetail(runId); // reload to pick up updated report with gap section
+    } catch (e) {
+      alert('Gap analysis failed: ' + e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = btnLabel();
+    }
+  };
+  wrap.append(fileIn, threshIn, btn);
+  section.appendChild(wrap);
+  return section;
+}
+
+async function showRunDetail(runId) {
+  const detail = document.getElementById('run-detail');
+  const info = await fetch(`${API}/api/runs/${runId}`).then(r => r.ok ? r.json() : null);
+  detail.innerHTML = '';
+  if (!info) { detail.innerHTML = '<div class="empty-state">Run not found.</div>'; return; }
+
+  if (info.status === 'running') {
+    detail.innerHTML = '<div class="empty-state">Crawling… this can take a minute or two on a real site.</div>';
+    return;
+  }
+  if (info.status === 'error') {
+    const box = el('div', 'error-box', info.error || 'Unknown error');
+    box.style.display = 'block';
+    detail.appendChild(box);
+    return;
+  }
+  detail.appendChild(renderGapUploadUI(runId, !!info.has_gap_analysis));
+  const frame = el('iframe', 'report-frame');
+  frame.src = `${API}/api/runs/${runId}/report`;
+  detail.appendChild(frame);
+}
+
+function selectRun(runId) {
+  activeRunId = runId;
+  document.querySelectorAll('.run-item').forEach(li => li.classList.remove('active'));
+  refreshRunsList();
+  showRunDetail(runId);
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    const info = await fetch(`${API}/api/runs/${runId}`).then(r => r.ok ? r.json() : null);
+    if (info && info.status !== 'running') {
+      clearInterval(pollTimer);
+      refreshRunsList();
+      showRunDetail(runId);
+    }
+  }, 2500);
+}
+
+document.querySelectorAll('.help-trigger').forEach(btn => {
+  btn.onclick = () => {
+    document.getElementById('help-overlay').style.display = 'flex';
+    const anchorId = btn.dataset.help;
+    if (anchorId) {
+      const anchor = document.getElementById('help-' + anchorId);
+      if (anchor) anchor.scrollIntoView({block: 'start'});
+    }
+  };
+});
+document.getElementById('help-close').onclick = () => { document.getElementById('help-overlay').style.display = 'none'; };
+document.getElementById('help-overlay').onclick = (e) => {
+  if (e.target.id === 'help-overlay') e.target.style.display = 'none';
+};
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') document.getElementById('help-overlay').style.display = 'none';
+});
+
+(async function init() {
+  await loadStatus();
+  await loadConfigs();
+  await refreshRunsList();
+})();
+</script>
+</body>
+</html>

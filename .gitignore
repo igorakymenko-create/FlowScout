@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.venv/
+venv/
+
+# Crawl output and per-project durable state -- local artifacts, not
+# source. projects/ holds identity/approval records keyed to whatever
+# site a config's start_url points at; runs/ holds full crawl reports.
+runs/
+projects/
+
+.env*
+!.env.example
+
+# configs/amfit.json points at a real, unaffiliated third-party site
+# (amfit.net) used during development for live verification against a
+# non-demo target -- kept locally, not committed. configs/saucedemo*.json
+# (a public practice/demo site built for exactly this kind of testing)
+# stay tracked as the example config.
+configs/amfit.json

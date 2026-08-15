@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flowscout"
+version = "0.1.0"
+description = "Autonomous browser agent that crawls a web app to discover real user flows and find test-coverage gaps against an existing test plan."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Igor Akymenko" }]
+keywords = ["testing", "qa", "playwright", "test-coverage", "crawler", "tcms"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "playwright>=1.45",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+flowscout = "flowscout.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/PLACEHOLDER/flowscout"
+"Engineering log" = "https://github.com/PLACEHOLDER/flowscout/blob/main/ROADMAP.md"
+
+[tool.setuptools.packages.find]
+include = ["flowscout*"]
+
+[tool.setuptools.package-data]
+"flowscout.web" = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

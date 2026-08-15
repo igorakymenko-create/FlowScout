@@ -1,0 +1,11 @@
+id,title,steps
+TC-01,Login with valid credentials,"Go to the login page. Enter a valid username and password. Submit the form. User lands on the inventory page."
+TC-02,Add an item to the cart from the product list,"From the inventory page, click Add to cart on any product. The cart badge should increment."
+TC-03,View a product's detail page,"From the inventory page, click a product's title or image. The product detail page should show its name, description, and price."
+TC-04,View shopping cart contents,"Open the cart from the header icon. The cart page should list every item that was added."
+TC-05,Proceed to checkout and enter shipping information,"From the cart page, click Checkout. Enter first name, last name, and postal code. Click Continue."
+TC-06,Complete an order successfully,"After entering shipping info and continuing, click Finish on the overview page. The order confirmation page should be shown."
+TC-07,Remove an item from the cart,"From the cart or product page, click Remove on an item that was previously added. The item should no longer be in the cart."
+TC-08,Login with an invalid password shows an error,"Enter a valid username with an incorrect password. Submit. An error message should be shown and the user should stay on the login page."
+TC-09,User can log out of the application,"While logged in, open the menu and click Logout. The user should be returned to the login page and the session should end."
+TC-10,Sort inventory items by price,"On the inventory page, use the sort dropdown to order items low to high. The list should re-order accordingly."

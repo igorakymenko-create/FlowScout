@@ -1,0 +1,21 @@
+{
+  "project": "saucedemo-wide",
+  "start_url": "https://www.saucedemo.com/",
+  "credentials": {
+    "user-name": "standard_user",
+    "username": "standard_user",
+    "password": "secret_sauce"
+  },
+  "limits": {
+    "max_depth": 8,
+    "max_breadth_per_state": 15,
+    "max_states": 100,
+    "max_flows": 150
+  },
+  "allow_mutating": true,
+  "allowed_domains": ["www.saucedemo.com"],
+  "semantic_dedup": {
+    "enabled": true,
+    "threshold": 0.95
+  }
+}
