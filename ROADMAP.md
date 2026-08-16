@@ -2161,3 +2161,27 @@ triggered lookup (not part of the crawl's own budget-sensitive loop).
   the same way as before -- empty result, no error -- just takes up to
   ~3.6s instead of ~0.4s, measured directly rather than assumed
   acceptable.
+
+## Parked — native mobile apps (exploratory research, Aug 2026, not started)
+
+Raised as "a topic to think about," not a decision to build. Answered
+from architecture inspection (which modules import Playwright, which
+don't), not from any live test against a real mobile app -- unlike
+everything else in this file, this hasn't been checked against a real
+target yet. Full writeup: [`docs/mobile-exploration.md`](docs/mobile-exploration.md).
+
+Headline: ~63% of the codebase (`gap_analysis.py`, `semantic_dedup.py`,
+`identity.py`, `report.py`, the whole web UI, ...) operates on
+`Flow`/`Transition`/`StateNode` and doesn't know what a browser is --
+the actual value proposition ports without changes. What doesn't:
+the driver (Playwright -> Appium, plausibly the easy part), element
+discovery (accessibility trees plausibly *easier* than the DOM, but
+framework-dependent -- Flutter/canvas-rendered apps may be a dead end),
+the state fingerprint (no URL exists on native at all -- the doc's
+proposed fix is a fingerprint-verified Back-button backtrack, worth
+folding into the *web* crawler too independent of mobile), and
+reset+replay's cost (mobile app resets are plausibly 5-15s+ each,
+vs. this project's own measured 90-660s *full crawls* on the web --
+DFS's per-candidate full-replay cost may not survive the port at all).
+Recommended first step, not yet taken: three empirical questions
+against one real Android app, before designing anything further.
