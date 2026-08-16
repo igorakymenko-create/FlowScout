@@ -2185,3 +2185,108 @@ vs. this project's own measured 90-660s *full crawls* on the web --
 DFS's per-candidate full-replay cost may not survive the port at all).
 Recommended first step, not yet taken: three empirical questions
 against one real Android app, before designing anything further.
+
+## Reverse gap analysis: diagnosing not_found TCMS items (done, Aug 2026)
+
+Raised directly: gap analysis already finds flows with nothing
+resembling them in the test plan ("gap"), but a TCMS item with nothing
+resembling it among discovered flows ("not_found") was a dead end --
+just a bare status, no reason. Two ideas from the user for what to do
+about it: (1) try to understand and reproduce the TCMS-described flow,
+to find gaps on FlowScout's own side; (2) if reproduction fails,
+diagnose *why* and say so -- an app bug, or a stale test case.
+
+**Idea (1), reframed before building anything.** The literal version --
+an LLM reads the TCMS text and drives a live browser trying to enact
+it -- was set aside deliberately, not attempted. That's a different
+tool category (agentic browser automation) with a different reliability
+profile (grounding free text to a real element is exactly the kind of
+guesswork this project has avoided everywhere else -- M1/M2's own
+history is full of embedding-similarity surprises when representations
+aren't chosen carefully), and it would mean asserting FlowScout tried
+something it can't fully verify happened the way it thinks it did. A
+graph-search alternative (does a path already exist in the *full*
+discovered graph, not just the promoted unique-flow pool, whose
+transition-label sequence matches the TCMS steps) was considered as a
+better-grounded middle path -- reuses data already collected, invents
+nothing -- but scoped out of this pass at the user's explicit choice;
+left for later, see the Parked idea below.
+
+**Idea (2), built now -- the cheaper, more directly useful half.** For
+every `not_found` TCMS item, `_diagnose_not_found()`
+(`gap_analysis.py`) checks two things the crawl already recorded,
+nothing new:
+
+1. **`skipped_candidates`** -- every action the crawl found but chose
+   not to follow, each with an exact reason (risk policy, a specific
+   limit). A semantic match here means "withheld", with the real reason
+   attached -- directly actionable (raise a limit, toggle
+   `allow_mutating`, adjust `exclude_patterns`).
+2. **`checkpoints`** (`kind == "error"`) -- actions the crawl DID
+   click, that raised a real exception. A match here means "errored" --
+   the strongest signal this project can offer for "this might be a
+   real app bug," short of a human confirming it.
+
+Neither matching leaves `diagnosis` as `None`, not a third catch-all
+status -- deliberately, since it could mean several different things
+(a stale test case, a path the crawl never got close to, or a
+precondition -- an already-logged-in admin, an item already in the
+cart -- the clean-slate-per-path model doesn't produce), and this
+project doesn't guess which. The report says exactly that rather than
+picking one.
+
+**Cost-conscious by construction.** `skipped_candidates` are deduped by
+`(label, reason)` before embedding -- the same withheld control often
+repeats across many states (e.g. "Open Menu" skipped at five different
+pages for the same reason), so this bounds the extra embedding calls by
+*distinct* withholding reasons, not raw occurrence count, which on a
+truncation-heavy run can be hundreds apart. Gated on the same
+`embeddings.api_key_configured(provider)` check as the rest of gap
+analysis -- degrades to undiagnosed `not_found` (the pre-existing
+behavior) rather than failing anything.
+
+**Threshold, stated honestly, not assumed.** Reuses `analyze_gaps()`'s
+own `threshold` parameter (0.74 by default) as a starting point --
+this specific comparison shape (TCMS text vs. a short skipped-candidate
+label or checkpoint message) has *not* been separately calibrated the
+way the action/nav pools were (see this file's own M1/M2 threshold
+story). Documented as informational, not as confidently scored as an
+action-pool match, both in the code and in the report's own copy.
+
+**Verified live, all three outcomes, not assumed from reading the
+code:**
+- **"withheld"**: saucedemo with `allow_mutating: false` (so add-to-
+  cart/checkout land in `skipped_candidates` with an explicit
+  `"mutating action withheld"` reason) plus a TCMS item describing
+  "Add a product to the shopping cart" -- correctly diagnosed
+  `withheld`, 78% match. (Genuinely instructive: it matched a
+  *different* real skipped-candidate entry for the same control --
+  one truncated by `max_depth` rather than the `allow_mutating`
+  withholding I'd set out to construct -- still accurate, still
+  useful, confirms the mechanism isn't just echoing back the one
+  case it was built against.)
+- **"errored"**: a local fixture (a button with `pointer-events:none`,
+  a real, deterministic Playwright actionability timeout, not a timing
+  race that could go either way) plus a matching TCMS item -- correctly
+  diagnosed `errored`, 80% match, detail text matches the real
+  checkpoint message.
+- **No diagnosis**: a TCMS item describing something that genuinely
+  doesn't exist on saucedemo ("Export order history as a PDF invoice")
+  -- correctly left undiagnosed, `None`/`None`.
+- Full HTML report rendered end-to-end with a real gap analysis
+  carrying both a "withheld" and a "no evidence found" item -- diagnosis
+  chips present and correctly styled (risk-mutating / risk-destructive /
+  risk-neutral, reusing the existing chip system rather than adding a
+  new one), no template errors.
+
+**Parked, not built now:** the graph-search half of idea (1) --
+searching the *full* discovered state graph (not just the promoted
+unique-flow pool) for a path whose transition-label sequence matches a
+`not_found` TCMS item's own steps, which would give "reachable, but
+never counted as its own flow" (budget/dedup truncation, not a real gap
+of any kind) its own honest diagnosis distinct from the three built
+here. No new crawling needed for it either -- same "read what's already
+there" discipline -- just a bigger search than a single embedding
+comparison. Scoped out at the user's explicit choice to start with the
+cheaper half; worth revisiting once there's a real `not_found` case
+that this doesn't already explain.

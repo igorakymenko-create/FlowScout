@@ -280,6 +280,18 @@ class TcmsCoverage:
     matched_flow_id: Optional[int]
     score: float
     confirmed: bool = False
+    # Only meaningful when status == "not_found" -- see
+    # gap_analysis.py's _diagnose_not_found(). Turns a bare "not found"
+    # into a specific, grounded reason using data the crawl already
+    # collected (skipped_candidates, error checkpoints) -- never new
+    # browsing, never a guess about intent. None means neither matched:
+    # could be a stale test case, a reachable path this crawl never got
+    # close to, or a precondition (already-logged-in admin, an item
+    # already in the cart) this crawl's clean-slate-per-path model
+    # doesn't produce -- the report says so honestly rather than
+    # picking one.
+    diagnosis: Optional[str] = None         # "withheld" | "errored" | None
+    diagnosis_detail: Optional[str] = None  # human-readable, ready for the report
 
 
 @dataclass
@@ -299,6 +311,8 @@ class GapAnalysis:
             "flows_confirmed": sum(1 for x in self.flow_coverage if x.confirmed),
             "tcms_covered": sum(1 for x in self.tcms_coverage if x.status == "covered"),
             "tcms_not_found": sum(1 for x in self.tcms_coverage if x.status == "not_found"),
+            "tcms_not_found_withheld": sum(1 for x in self.tcms_coverage if x.diagnosis == "withheld"),
+            "tcms_not_found_errored": sum(1 for x in self.tcms_coverage if x.diagnosis == "errored"),
         }
 
     def to_json(self) -> dict:

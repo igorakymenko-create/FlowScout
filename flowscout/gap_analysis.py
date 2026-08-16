@@ -213,6 +213,90 @@ def _match_pool(pool_vecs: dict, tcms_pool: list[TcmsItem], tcms_vecs: dict,
     return verdict, tcms_matches
 
 
+def _diagnose_not_found(not_found: list[TcmsCoverage], tcms_by_id: dict[str, TcmsItem],
+                         run: RunResult, provider: str | None, threshold: float) -> None:
+    """Mutates each TcmsCoverage in `not_found` in place, attaching a
+    `diagnosis` when one is warranted. Turns a bare "not_found" into a
+    specific, grounded reason using data the crawl already collected --
+    never new browsing, never a guess about the TCMS item's intent (see
+    the module docstring's own reasoning for why matching stays
+    read-only). Two honest signals, in priority order:
+
+    1. "withheld" -- the crawl found something matching the TCMS text,
+       but chose not to follow it (run.skipped_candidates already
+       records exactly why: a risk-policy withholding, a specific
+       limit). Directly actionable: raise the limit, toggle
+       allow_mutating, adjust exclude_patterns.
+    2. "errored" -- the crawl DID click something matching, and it
+       raised a real exception (run.checkpoints, kind == "error"). The
+       strongest signal this project can offer for "this might be a
+       real bug in the app", short of a human confirming it.
+
+    Neither matching leaves `diagnosis` as None -- deliberately not a
+    third catch-all status, since it could mean several genuinely
+    different things (a stale test case, a reachable path this crawl
+    never got close to, or a precondition -- an already-logged-in
+    admin, an item already in the cart -- this crawl's clean-slate-per-
+    path model doesn't produce) and this project doesn't guess which.
+
+    Uses the same embeddings dispatch as the rest of gap analysis, but
+    this specific comparison (TCMS text vs. a short skipped-candidate
+    label or checkpoint message) has NOT been separately calibrated the
+    way the action/nav pools were (see module docstring's own threshold
+    section) -- reuses `threshold` as a starting point, not a verified
+    one for this comparison shape. Treat a `diagnosis` as informational,
+    not as confidently scored as an action-pool match."""
+    if not not_found or not embeddings.api_key_configured(provider):
+        return
+
+    # Dedupe by (label, reason) / message -- many skipped_candidates are
+    # the same withheld control repeated across several states (e.g.
+    # "Open Menu" skipped at 5 different pages for the same reason).
+    # Embedding each DISTINCT one once instead of every raw occurrence
+    # is the difference between a handful of extra API calls and
+    # hundreds on a run with a lot of truncation.
+    skipped_unique: dict[tuple[str, str], str] = {}
+    for s in run.skipped_candidates:
+        key = (s["label"], s["reason"])
+        skipped_unique.setdefault(key, f'{s["label"]} ({s["reason"]})')
+
+    error_unique: dict[str, str] = {}
+    for cp in run.checkpoints:
+        if cp.kind == "error":
+            error_unique.setdefault(cp.message, cp.message)
+
+    if not skipped_unique and not error_unique:
+        return
+
+    try:
+        skipped_vecs = {k: embeddings.embed_text(t, provider=provider) for k, t in skipped_unique.items()}
+        error_vecs = {m: embeddings.embed_text(m, provider=provider) for m in error_unique}
+        tcms_vecs = {tc.tcms_id: embeddings.embed_text(tcms_by_id[tc.tcms_id].text(), provider=provider)
+                     for tc in not_found}
+    except EmbeddingsUnavailable:
+        return  # diagnosis is a bonus on top of gap analysis, not worth failing the whole thing over
+
+    for tc in not_found:
+        vec = tcms_vecs[tc.tcms_id]
+        best_kind, best_key, best_score = None, None, 0.0
+        for key, svec in skipped_vecs.items():
+            score = cosine_similarity(vec, svec)
+            if score > best_score:
+                best_kind, best_key, best_score = "withheld", key, score
+        for msg, evec in error_vecs.items():
+            score = cosine_similarity(vec, evec)
+            if score > best_score:
+                best_kind, best_key, best_score = "errored", msg, score
+        if best_kind is None or best_score < threshold:
+            continue
+        tc.diagnosis = best_kind
+        if best_kind == "withheld":
+            label, reason = best_key
+            tc.diagnosis_detail = f'Crawl saw a matching control but withheld it: "{label}" -- {reason} ({best_score:.0%} match)'
+        else:
+            tc.diagnosis_detail = f'Crawl attempted a matching action and it raised an error: "{best_key}" ({best_score:.0%} match)'
+
+
 def analyze_gaps(run: RunResult, tcms_items: list[TcmsItem], tcms_source: str,
                   threshold: float = DEFAULT_THRESHOLD, project_state=None) -> GapAnalysis:
     # Provider (Aug 2026): see semantic_dedup.py's own note on the same
@@ -376,15 +460,29 @@ def analyze_gaps(run: RunResult, tcms_items: list[TcmsItem], tcms_source: str,
     flow_coverage_list = [flow_coverage[f.id] for f in unique_flows]
     tcms_coverage_list = [tcms_coverage[t.id] for t in tcms_items]
 
+    # Reverse direction (Aug 2026): for every TCMS item the crawl found
+    # nothing resembling, look for a grounded reason in data the crawl
+    # already collected (skipped_candidates, error checkpoints) before
+    # leaving it as a bare "not_found" -- see _diagnose_not_found()'s
+    # own docstring. Independent of the matching passes above (doesn't
+    # need action_text/nav_text to have existed), gated only on its own
+    # data actually being available.
+    not_found_items = [tc for tc in tcms_coverage_list if tc.status == "not_found"]
+    _diagnose_not_found(not_found_items, tcms_by_id, run, provider, threshold)
+
     gaps = sum(1 for x in flow_coverage_list if x.status == "gap")
     partial = sum(1 for x in flow_coverage_list if x.status == "partial")
     not_found = sum(1 for x in tcms_coverage_list if x.status == "not_found")
+    withheld_n = sum(1 for x in not_found_items if x.diagnosis == "withheld")
+    errored_n = sum(1 for x in not_found_items if x.diagnosis == "errored")
     status = f"ran: {len(unique_flows)} flows vs {len(tcms_items)} TCMS items"
     if confirmed_n:
         status += f", {confirmed_n} already confirmed"
     if fuzzy_note:
         status += f"; {fuzzy_note}"
     status += f" — {gaps} flow(s) undocumented, {partial} partially covered, {not_found} test(s) not found in the app"
+    if withheld_n or errored_n:
+        status += f" ({withheld_n} withheld by risk/limit policy, {errored_n} attempted and errored)"
 
     return GapAnalysis(tcms_source=tcms_source, threshold=threshold, status=status,
                         flow_coverage=flow_coverage_list, tcms_coverage=tcms_coverage_list)

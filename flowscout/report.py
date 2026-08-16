@@ -224,11 +224,32 @@ def _gap_section_html(gap: GapAnalysis | None, run: RunResult) -> str:
                     f'(no state-changing action to test — same shared-step signal M4 codegen uses).</p>')
 
     if not_found:
+        # Reverse direction (Aug 2026): a bare "not_found" doesn't say
+        # WHY -- could be a stale test case, a path this crawl never got
+        # close to, or a precondition (already-logged-in admin, an item
+        # already in the cart) the clean-slate-per-path model doesn't
+        # produce. `diagnosis` (see gap_analysis.py's _diagnose_not_found)
+        # is a grounded reason drawn from data the crawl already
+        # collected -- withheld by risk/limit policy, or attempted and
+        # errored -- when one was found; honestly labeled "no evidence"
+        # rather than guessed at when neither matched.
+        def _diagnosis_chip(x):
+            if x.diagnosis == "withheld":
+                return f'<span class="risk-chip risk-mutating" title="{_esc(x.diagnosis_detail)}">withheld</span>'
+            if x.diagnosis == "errored":
+                return f'<span class="risk-chip risk-destructive" title="{_esc(x.diagnosis_detail)}">attempted, errored</span>'
+            return '<span class="risk-chip risk-neutral">no evidence found</span>'
+
         rows = "".join(f"""
         <tr><td class="mono">{_esc(x.tcms_id)}</td><td>{_esc(x.tcms_title)}</td>
-        <td class="num">{x.score:.0%}</td></tr>""" for x in not_found)
+        <td class="num">{x.score:.0%}</td><td>{_diagnosis_chip(x)}</td></tr>""" for x in not_found)
         not_found_html = (f'<table class="data-table"><thead><tr><th>ID</th><th>Title</th>'
-                           f'<th class="num">Best match score</th></tr></thead><tbody>{rows}</tbody></table>')
+                           f'<th class="num">Best match score</th><th>Diagnosis</th></tr></thead>'
+                           f'<tbody>{rows}</tbody></table>'
+                           f'<p class="subhead">"Withheld"/"attempted, errored" are drawn from what this '
+                           f'crawl actually saw (hover for detail) -- "no evidence found" means neither '
+                           f'matched, which could mean a stale test case, an unexplored path, or a '
+                           f'precondition this crawl doesn\'t set up on its own.</p>')
     else:
         not_found_html = '<p class="empty">Every test case matched a discovered flow.</p>'
 
