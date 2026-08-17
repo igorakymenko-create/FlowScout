@@ -230,14 +230,18 @@ def _gap_section_html(gap: GapAnalysis | None, run: RunResult) -> str:
         # already in the cart) the clean-slate-per-path model doesn't
         # produce. `diagnosis` (see gap_analysis.py's _diagnose_not_found)
         # is a grounded reason drawn from data the crawl already
-        # collected -- withheld by risk/limit policy, or attempted and
-        # errored -- when one was found; honestly labeled "no evidence"
-        # rather than guessed at when neither matched.
+        # collected -- withheld by risk/limit policy, attempted and
+        # errored, or discovered but never tried (a budget gap on
+        # FlowScout's own side, not the app's) -- when one was found;
+        # honestly labeled "no evidence" rather than guessed at when
+        # none matched.
         def _diagnosis_chip(x):
             if x.diagnosis == "withheld":
                 return f'<span class="risk-chip risk-mutating" title="{_esc(x.diagnosis_detail)}">withheld</span>'
             if x.diagnosis == "errored":
                 return f'<span class="risk-chip risk-destructive" title="{_esc(x.diagnosis_detail)}">attempted, errored</span>'
+            if x.diagnosis == "discovered_not_walked":
+                return f'<span class="risk-chip risk-safe" title="{_esc(x.diagnosis_detail)}">seen, not tried</span>'
             return '<span class="risk-chip risk-neutral">no evidence found</span>'
 
         rows = "".join(f"""
@@ -246,10 +250,12 @@ def _gap_section_html(gap: GapAnalysis | None, run: RunResult) -> str:
         not_found_html = (f'<table class="data-table"><thead><tr><th>ID</th><th>Title</th>'
                            f'<th class="num">Best match score</th><th>Diagnosis</th></tr></thead>'
                            f'<tbody>{rows}</tbody></table>'
-                           f'<p class="subhead">"Withheld"/"attempted, errored" are drawn from what this '
-                           f'crawl actually saw (hover for detail) -- "no evidence found" means neither '
-                           f'matched, which could mean a stale test case, an unexplored path, or a '
-                           f'precondition this crawl doesn\'t set up on its own.</p>')
+                           f'<p class="subhead">"Withheld"/"attempted, errored"/"seen, not tried" are drawn '
+                           f'from what this crawl actually saw (hover for detail) -- "seen, not tried" means '
+                           f'the crawl discovered the control but ran out of budget before trying it (raise '
+                           f'max_flows/max_states to close it); "no evidence found" means none of the three '
+                           f'matched, which could mean a stale test case or a precondition this crawl '
+                           f'doesn\'t set up on its own.</p>')
     else:
         not_found_html = '<p class="empty">Every test case matched a discovered flow.</p>'
 

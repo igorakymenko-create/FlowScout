@@ -419,6 +419,19 @@ def crawl(config: dict) -> RunResult:
                 frame.any_followed = True
 
                 if result is None:
+                    # Found while building gap_analysis.py's action-pool
+                    # broadening (Aug 2026): trial.outcome was never set
+                    # here at all, silently staying at its dataclass
+                    # default "ok" -- meaning report.py's own `elif
+                    # t.outcome == "error":` rendering (a red step-error
+                    # note with the exception detail) was dead code, and
+                    # a flow's failed final step rendered identically to
+                    # a normal successful one. _run_path() always appends
+                    # exactly one Checkpoint right before returning None
+                    # (its only return-None path), so this is always the
+                    # matching detail, not a guess.
+                    trial.outcome = "error"
+                    trial.detail = run.checkpoints[-1].detail if run.checkpoints else ""
                     emit_flow(frame.path + [trial], end_fp=frame.fp, forced_status=FlowStatus.BLOCKED,
                               extra_reason=f"Terminated: action '{trial.action_label}' raised an error")
                     continue

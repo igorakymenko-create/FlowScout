@@ -28,12 +28,23 @@ gap and covered depending which flow happened to carry it.
 Fix, two pools instead of one:
 
 1. **Mutating-action pool** -- one entry per distinct
-   `action_norm_signature` with `risk == MUTATING` across all unique
-   flows (deduplicated: the same action shared by many flows costs one
-   embedding, not one per flow). Each flow's status is *derived* from
-   its own actions' individual verdicts: "covered" only if every one
-   matched something, "partial" if some did and some didn't (see
-   `FlowCoverage.action_matches` for exactly which), "gap" if none did.
+   `action_norm_signature` with `risk == MUTATING` across every flow the
+   crawl walked, any status, not just unique ones (deduplicated: the
+   same action shared by many flows costs one embedding, not one per
+   flow; an action that errored instead of completing is excluded --
+   see `_action_pool_from()`'s own note, Aug 2026 fix). *Reportable
+   flow status* stays scoped to unique flows only -- "covered" only if
+   every one of a flow's own actions matched something, "partial" if
+   some did and some didn't (see `FlowCoverage.action_matches` for
+   exactly which), "gap" if none did -- but the *pool of known
+   capabilities* an action gets compared against is drawn from
+   everything the crawl actually did, including inside flows that got
+   deduped or truncated before being counted unique. Found live:
+   saucedemo's own `finish` step (the last click of checkout) only ever
+   completed inside flows that ended up duplicate or blocked -- pooling
+   from unique flows alone silently dropped it from the pool entirely,
+   so a TCMS item describing checkout completion scored a false
+   "not_found" despite the crawl genuinely having done it.
 2. **Navigation-flow pool** -- flows with an *empty* mutating set
    (pure browsing) aren't independently testable the way a mutating
    action is, so they can't be decomposed the same way. They keep the
@@ -148,7 +159,15 @@ def _action_pool_from(flows: list[Flow], states: dict) -> tuple[dict[str, str], 
     """One representative text per distinct mutating action_norm_signature
     across `flows`, plus which flow ids perform each one. First
     occurrence wins the text (signatures are already page-scoped by
-    construction in the common case -- see identity.py)."""
+    construction in the common case -- see identity.py).
+
+    `flows` is deliberately ALL flows the crawl walked, any status, not
+    just the ones that survived as "unique" (Aug 2026 fix -- see module
+    docstring's own note on this). A signature that only ever appears
+    inside a duplicate/blocked flow is still a real, performed app
+    capability; restricting the pool to unique flows meant it silently
+    never entered the pool at all, and a TCMS item describing it scored
+    a false "not_found" despite the crawl genuinely having done it."""
     text: dict[str, str] = {}
     owners: dict[str, list[int]] = {}
     for f in flows:
@@ -159,6 +178,15 @@ def _action_pool_from(flows: list[Flow], states: dict) -> tuple[dict[str, str], 
             # state-changing action, even though it's risk == SAFE.
             if not (t.risk == Risk.MUTATING or t.is_choice):
                 continue
+            # Excludes an action that was attempted and errored (see
+            # crawler.py: to_fp only stays None for the one transition
+            # that raised an exception, never set on a genuine success)
+            # -- an action that FAILED isn't a real capability the app
+            # has, it's the opposite signal, and belongs in
+            # _diagnose_not_found's "errored" bucket instead of quietly
+            # counting as "the app supports this."
+            if t.to_fp is None:
+                continue
             sig = t.action_norm_signature
             owners.setdefault(sig, []).append(f.id)
             if sig not in text:
@@ -166,6 +194,18 @@ def _action_pool_from(flows: list[Flow], states: dict) -> tuple[dict[str, str], 
                 page = human_page_label(from_state.url_pattern) if from_state else "unknown page"
                 text[sig] = f"On {page}: {t.action_label}"
     return text, owners
+
+
+def _pick_matched_flow_id(owner_ids: list[int], unique_ids: set[int]) -> int:
+    """Prefer a UNIQUE flow as the "look here" pointer a human follows
+    from the report -- it's the canonical, individually-reportable
+    example. Falls back to any owner (necessarily a duplicate/blocked
+    flow) only when the action genuinely doesn't exist in any unique
+    flow, e.g. saucedemo's own "finish" step, which the crawl only ever
+    completed inside flows that got deduped or truncated before being
+    counted unique."""
+    unique_owners = [i for i in owner_ids if i in unique_ids]
+    return min(unique_owners) if unique_owners else min(owner_ids)
 
 
 def _nav_flow_text(flow: Flow, states: dict) -> str | None:
@@ -220,7 +260,10 @@ def _diagnose_not_found(not_found: list[TcmsCoverage], tcms_by_id: dict[str, Tcm
     specific, grounded reason using data the crawl already collected --
     never new browsing, never a guess about the TCMS item's intent (see
     the module docstring's own reasoning for why matching stays
-    read-only). Two honest signals, in priority order:
+    read-only). Three honest signals, whichever scores highest wins
+    (no artificial priority order beyond that -- each pool represents a
+    genuinely different explanation, and the best textual match among
+    all available evidence is the most honest choice):
 
     1. "withheld" -- the crawl found something matching the TCMS text,
        but chose not to follow it (run.skipped_candidates already
@@ -231,21 +274,34 @@ def _diagnose_not_found(not_found: list[TcmsCoverage], tcms_by_id: dict[str, Tcm
        raised a real exception (run.checkpoints, kind == "error"). The
        strongest signal this project can offer for "this might be a
        real bug in the app", short of a human confirming it.
+    3. "discovered_not_walked" -- a control matching the TCMS text was
+       discovered (it's in some StateNode's own `candidates`) but never
+       became a transition in any flow AND never got an explicit
+       skipped_candidates entry either -- genuinely fell through the
+       cracks rather than being deliberately withheld. The clearest
+       case this happens: `max_flows` cutting a persona's pass short
+       records one aggregate Checkpoint for everything still queued
+       (see "Depth-truncation was invisible" above), not a per-candidate
+       skip reason, so a specific control lost to it has no individual
+       trace anywhere except its own discovery record. Tells the
+       operator "the app has this, the crawl saw it, but ran out of
+       budget before ever trying it" -- a gap on FlowScout's own side,
+       not the app's.
 
-    Neither matching leaves `diagnosis` as None -- deliberately not a
-    third catch-all status, since it could mean several genuinely
-    different things (a stale test case, a reachable path this crawl
-    never got close to, or a precondition -- an already-logged-in
-    admin, an item already in the cart -- this crawl's clean-slate-per-
-    path model doesn't produce) and this project doesn't guess which.
+    None of the three matching leaves `diagnosis` as None -- deliberately
+    not a fourth catch-all status, since that could still mean several
+    genuinely different things (a stale test case, or a precondition --
+    an already-logged-in admin, an item already in the cart -- this
+    crawl's clean-slate-per-path model doesn't produce) and this project
+    doesn't guess which.
 
     Uses the same embeddings dispatch as the rest of gap analysis, but
-    this specific comparison (TCMS text vs. a short skipped-candidate
-    label or checkpoint message) has NOT been separately calibrated the
-    way the action/nav pools were (see module docstring's own threshold
-    section) -- reuses `threshold` as a starting point, not a verified
-    one for this comparison shape. Treat a `diagnosis` as informational,
-    not as confidently scored as an action-pool match."""
+    this specific comparison (TCMS text vs. a short skipped-candidate/
+    checkpoint/discovered-candidate label) has NOT been separately
+    calibrated the way the action/nav pools were (see module docstring's
+    own threshold section) -- reuses `threshold` as a starting point,
+    not a verified one for this comparison shape. Treat a `diagnosis` as
+    informational, not as confidently scored as an action-pool match."""
     if not not_found or not embeddings.api_key_configured(provider):
         return
 
@@ -265,12 +321,31 @@ def _diagnose_not_found(not_found: list[TcmsCoverage], tcms_by_id: dict[str, Tcm
         if cp.kind == "error":
             error_unique.setdefault(cp.message, cp.message)
 
-    if not skipped_unique and not error_unique:
+    # Every norm_signature that ever became a real transition, in ANY
+    # flow, any status -- same "any status counts" reasoning as the
+    # action-pool broadening above, but here used as an EXCLUSION set:
+    # a candidate already walked (successfully or not) isn't "never
+    # walked". Deliberately not excluding skipped_candidates entries
+    # here (would need fuzzy label matching -- skipped_candidates
+    # doesn't record norm_signature) -- an already-skipped control
+    # competing in both pools is harmless, since whichever pool's text
+    # scores higher wins on its own merits.
+    walked_sigs = {t.action_norm_signature for f in run.flows for t in f.transitions}
+    discovered_unique: dict[str, str] = {}
+    for node in run.states.values():
+        page = human_page_label(node.url_pattern)
+        for c in node.candidates:
+            if c.norm_signature in walked_sigs or c.norm_signature in discovered_unique:
+                continue
+            discovered_unique[c.norm_signature] = f"On {page}: {c.label}"
+
+    if not skipped_unique and not error_unique and not discovered_unique:
         return
 
     try:
         skipped_vecs = {k: embeddings.embed_text(t, provider=provider) for k, t in skipped_unique.items()}
         error_vecs = {m: embeddings.embed_text(m, provider=provider) for m in error_unique}
+        discovered_vecs = {sig: embeddings.embed_text(t, provider=provider) for sig, t in discovered_unique.items()}
         tcms_vecs = {tc.tcms_id: embeddings.embed_text(tcms_by_id[tc.tcms_id].text(), provider=provider)
                      for tc in not_found}
     except EmbeddingsUnavailable:
@@ -287,14 +362,20 @@ def _diagnose_not_found(not_found: list[TcmsCoverage], tcms_by_id: dict[str, Tcm
             score = cosine_similarity(vec, evec)
             if score > best_score:
                 best_kind, best_key, best_score = "errored", msg, score
+        for sig, dvec in discovered_vecs.items():
+            score = cosine_similarity(vec, dvec)
+            if score > best_score:
+                best_kind, best_key, best_score = "discovered_not_walked", discovered_unique[sig], score
         if best_kind is None or best_score < threshold:
             continue
         tc.diagnosis = best_kind
         if best_kind == "withheld":
             label, reason = best_key
             tc.diagnosis_detail = f'Crawl saw a matching control but withheld it: "{label}" -- {reason} ({best_score:.0%} match)'
-        else:
+        elif best_kind == "errored":
             tc.diagnosis_detail = f'Crawl attempted a matching action and it raised an error: "{best_key}" ({best_score:.0%} match)'
+        else:
+            tc.diagnosis_detail = f'Crawl discovered a matching control but never tried it (likely ran out of budget): "{best_key}" ({best_score:.0%} match)'
 
 
 def analyze_gaps(run: RunResult, tcms_items: list[TcmsItem], tcms_source: str,
@@ -363,7 +444,13 @@ def analyze_gaps(run: RunResult, tcms_items: list[TcmsItem], tcms_source: str,
         else:
             nav_text[f.id] = txt
 
-    action_text, action_owners = _action_pool_from(action_flows, run.states)
+    # Pool source is ALL flows the crawl walked (any status), not just
+    # `action_flows` (unique-only) -- see _action_pool_from()'s own
+    # docstring. `action_flows`/`mutations` stay unique-scoped below,
+    # unaffected: they decide each *reportable* flow's own coverage
+    # status, a separate concern from what capabilities exist at all.
+    unique_flow_ids = {f.id for f in unique_flows}
+    action_text, action_owners = _action_pool_from(run.flows, run.states)
 
     action_verdict: dict[str, tuple] = {}
     nav_verdict: dict[int, tuple] = {}
@@ -396,7 +483,7 @@ def analyze_gaps(run: RunResult, tcms_items: list[TcmsItem], tcms_source: str,
         for tid, (sig, score) in action_tcms_matches.items():
             tcms_coverage[tid] = TcmsCoverage(
                 tcms_id=tid, tcms_title=tcms_by_id[tid].title, status="covered",
-                matched_flow_id=min(action_owners[sig]), score=score,
+                matched_flow_id=_pick_matched_flow_id(action_owners[sig], unique_flow_ids), score=score,
             )
 
         # Pass 2: navigation flows, only against whatever's still unclaimed.
@@ -475,14 +562,16 @@ def analyze_gaps(run: RunResult, tcms_items: list[TcmsItem], tcms_source: str,
     not_found = sum(1 for x in tcms_coverage_list if x.status == "not_found")
     withheld_n = sum(1 for x in not_found_items if x.diagnosis == "withheld")
     errored_n = sum(1 for x in not_found_items if x.diagnosis == "errored")
+    undiscovered_n = sum(1 for x in not_found_items if x.diagnosis == "discovered_not_walked")
     status = f"ran: {len(unique_flows)} flows vs {len(tcms_items)} TCMS items"
     if confirmed_n:
         status += f", {confirmed_n} already confirmed"
     if fuzzy_note:
         status += f"; {fuzzy_note}"
     status += f" — {gaps} flow(s) undocumented, {partial} partially covered, {not_found} test(s) not found in the app"
-    if withheld_n or errored_n:
-        status += f" ({withheld_n} withheld by risk/limit policy, {errored_n} attempted and errored)"
+    if withheld_n or errored_n or undiscovered_n:
+        status += (f" ({withheld_n} withheld by risk/limit policy, {errored_n} attempted and errored, "
+                    f"{undiscovered_n} discovered but never tried)")
 
     return GapAnalysis(tcms_source=tcms_source, threshold=threshold, status=status,
                         flow_coverage=flow_coverage_list, tcms_coverage=tcms_coverage_list)

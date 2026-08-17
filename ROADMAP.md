@@ -2289,4 +2289,142 @@ here. No new crawling needed for it either -- same "read what's already
 there" discipline -- just a bigger search than a single embedding
 comparison. Scoped out at the user's explicit choice to start with the
 cheaper half; worth revisiting once there's a real `not_found` case
-that this doesn't already explain.
+that this doesn't already explain. **Revisited the next day -- see
+"Reverse gap analysis, part 2" below: measuring idea (1) properly
+before building the graph-search version found a cheaper, more
+important problem first (a real false negative, not a missing
+diagnosis) and fixed that instead of the originally-parked idea.**
+
+## Reverse gap analysis, part 2: a real false negative, found by measuring idea (1) before building it (done, Aug 2026)
+
+Came back to the parked graph-search idea with the discipline this
+project keeps using: measure before designing. Two measurements first,
+neither assumed:
+
+**Measurement 1 -- the TCMS step format itself doesn't support step-
+by-step matching.** Checked this project's own `fixtures/
+tcms_saucedemo.csv` (a real, representative export, not a synthetic
+one): `steps` is unstructured prose, no numbering, and mixes actions
+with expected results in the same sentence -- `"click Add to cart on
+any product. The cart badge should increment."` A naive step-by-step
+split would try to match "the cart badge should increment" against
+something clickable, which can't ever succeed (FlowScout deliberately
+never asserts about outcomes) and isn't a real gap either. The
+graph-search version of idea (1) would have needed this exact
+step-by-step structure to mean anything -- checked before building it,
+not discovered after.
+
+**Measurement 2 -- a real, measurable blind spot, and it's a false
+negative, not a missing diagnosis.** Counted directly on the saved
+`saucedemo-wide` run (112 flows: 27 unique, 80 duplicate, 5 blocked):
+9 distinct mutating/choice signatures in the unique-flow pool
+`gap_analysis.py` already compares against, but **10** across every
+flow the crawl actually walked. The missing one: `finish` -- the last
+click of checkout, on this run reachable only through flows that ended
+up deduped or truncated before ever being counted "unique". A TCMS
+item describing checkout completion would score a false `not_found`
+today, despite the crawl genuinely having completed it. This isn't
+something graph-search diagnosis (the originally parked idea) would
+even explain correctly -- it's not "reachable but not counted", it's
+"literally already happened, and the tool just isn't looking at the
+data that proves it."
+
+**Built the fix for the measured problem, in order of found cost, both
+grounded in data already collected -- no new crawling, no LLM-driven
+live browsing:**
+
+**A. Action pool now draws from every flow the crawl walked, not just
+unique ones.** `_action_pool_from()`'s `flows` parameter is now
+`run.flows` (any status) at the `analyze_gaps()` call site, not
+`action_flows` (unique-only). *Reportable* flow status (`FlowCoverage`
+-- what an operator actually sees per flow) stays scoped to unique
+flows exactly as before; only the *pool of known capabilities* an
+action gets compared against widened. A real second bug caught while
+building this, not assumed away: broadening naively would have also
+pooled in an action that was *attempted and failed* (a flow terminated
+by `"Terminated: action ... raised an error"` still carries that failed
+action as its last transition) as if the app supports it -- exactly
+backwards, since a failed action is the opposite signal. Fixed by
+excluding any transition with `to_fp is None` (crawler.py: only ever
+true for the one transition that raised an exception, never set on a
+genuine success). `matched_flow_id` selection (`_pick_matched_flow_id`)
+now prefers a unique flow when one exists, falling back to a
+duplicate/blocked flow's id only when the action genuinely lives
+nowhere else -- keeps the report's "look at flow #N" pointer canonical
+when possible.
+
+**A sibling bug found and fixed along the way, not scope-creep --
+directly in the same code path.** `Transition.outcome` was documented
+(`# ok | revisit | skipped | error`) but crawler.py never actually set
+it to `"error"` anywhere -- the error-termination branch built the
+`Checkpoint` correctly but left `trial.outcome` at its dataclass
+default `"ok"`. This made `report.py`'s own `elif t.outcome ==
+"error":` rendering (a red step-error note with the exception detail)
+dead code: a flow's failed final step rendered identically to a normal
+successful one. Also needed directly for the `to_fp is None` exclusion
+above to be trustworthy (same signal, more explicit). Fixed: the error
+branch now sets `trial.outcome = "error"` and `trial.detail` from the
+Checkpoint it always appends immediately before returning (its only
+return-`None` path, so this is always the matching detail, not a
+guess). Verified live on a deterministic `pointer-events:none` fixture
+(not a timing race): `outcome == "error"`, real Playwright timeout text
+in `detail`, and the report's `step-error` note actually renders.
+
+**B. New third diagnosis, `"discovered_not_walked"`, for `not_found`
+TCMS items.** Extends `_diagnose_not_found()` (see "Reverse gap
+analysis" above) with a third pool: every candidate discovered in some
+`StateNode.candidates` whose `norm_signature` never became a transition
+in any flow, any status. The clearest real case this catches:
+`max_flows` cutting a persona's pass short records one aggregate
+`Checkpoint` for everything still queued, not a per-candidate
+`skipped_candidates` reason -- so a specific control lost to it has no
+individual trace anywhere except its own discovery record. Tells the
+operator "the app has this, the crawl saw it, but ran out of budget
+before trying it" -- a gap on FlowScout's own side, not the app's,
+distinct from "withheld" (an explicit, reasoned withholding) and
+"errored" (attempted and failed). All three pools now score against
+each `not_found` item together, highest wins -- no artificial priority
+order beyond that, since each represents a genuinely different,
+independently-plausible explanation.
+
+**Verified live, both parts, plus the report render:**
+- **Part A**: `_action_pool_from(run.flows, ...)` on the saved
+  `saucedemo-wide` run now includes `finish` (absent before);
+  `finish`'s only owner is a non-unique flow, confirming
+  `_pick_matched_flow_id`'s fallback path actually engages, not just
+  its preferred path. A TCMS item describing checkout completion:
+  `not_found` before this fix, `covered` (0.87 score) after, against
+  the *same* underlying run data -- confirms this is a real correction,
+  not a different measurement.
+- **Part B**: saucedemo crawled live with a deliberately tight
+  `max_flows=3` (5 states discovered, only 3 flows walked, checkpoint
+  confirms "28 candidate action(s) never tried"). A TCMS item for
+  "Add a product to the shopping cart" -- a control confirmed present
+  in `StateNode.candidates`, confirmed absent from every flow's
+  transitions AND from `skipped_candidates` -- correctly diagnosed
+  `discovered_not_walked`, 81% match, detail naming the exact control
+  ("On Inventory: Add to cart").
+- **A real false-positive risk found and avoided during this exact
+  verification, not shipped by accident:** two TCMS items about the
+  cart page scored `covered` through the *pre-existing* navigation-flow
+  pool's own known imprecision (a pure-navigation flow's whole-flow
+  text happened to say "Ends on Cart page", coincidentally close enough
+  to both "open the cart" and "proceed to checkout" text) *before ever
+  reaching the new diagnosis code* -- already documented as a live
+  limitation in this module's own docstring ("still not fixed by this,
+  honestly"), not something introduced today. Recognized the
+  contamination, switched to a TCMS item describing a genuinely
+  mutating action (which can only match through the action pool) to
+  get a clean, uncontaminated verification of Part B specifically.
+- Full HTML report re-rendered with both new (`discovered_not_walked`,
+  a green "seen, not tried" chip reusing the existing risk-chip system)
+  and previously-built (`withheld`, `errored`, no-evidence) diagnosis
+  chips present together, no template errors.
+
+**Not built, and why:** the graph-search version of idea (1) stays
+parked. Measurement 1 above is the honest reason -- the TCMS step
+format this project's own real data actually has doesn't support
+step-by-step sequence matching yet, so building the search machinery
+first would have produced something with nothing meaningful to search
+against. Worth revisiting if TCMS sources with real structured steps
+show up, not before.

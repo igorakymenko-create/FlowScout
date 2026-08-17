@@ -290,7 +290,7 @@ class TcmsCoverage:
     # already in the cart) this crawl's clean-slate-per-path model
     # doesn't produce -- the report says so honestly rather than
     # picking one.
-    diagnosis: Optional[str] = None         # "withheld" | "errored" | None
+    diagnosis: Optional[str] = None         # "withheld" | "errored" | "discovered_not_walked" | None
     diagnosis_detail: Optional[str] = None  # human-readable, ready for the report
 
 
@@ -313,6 +313,8 @@ class GapAnalysis:
             "tcms_not_found": sum(1 for x in self.tcms_coverage if x.status == "not_found"),
             "tcms_not_found_withheld": sum(1 for x in self.tcms_coverage if x.diagnosis == "withheld"),
             "tcms_not_found_errored": sum(1 for x in self.tcms_coverage if x.diagnosis == "errored"),
+            "tcms_not_found_discovered_not_walked": sum(
+                1 for x in self.tcms_coverage if x.diagnosis == "discovered_not_walked"),
         }
 
     def to_json(self) -> dict:
