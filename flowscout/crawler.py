@@ -154,6 +154,262 @@ def _order_for(node: StateNode, max_breadth: int, run: RunResult, revisit_histor
     return idxs
 
 
+def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_name: str,
+             stack: list[_Frame], next_flow_id: list[int],
+             max_depth: int, max_breadth: int, max_states: int, max_flows: int,
+             max_action_repeat: int, allow_mutating: bool,
+             states_before: int, flows_before: int, show_persona_suffix: bool,
+             seq_to_flow_id: dict[tuple, int], revisit_history: set[str]) -> None:
+    """The DFS loop itself -- extracted (Aug 2026) so crawl()'s own
+    per-persona pass and resume_flow()'s targeted continuation from a
+    single already-BLOCKED flow can share it instead of duplicating the
+    loop. Mutates `run` in place (states/flows/checkpoints/
+    skipped_candidates); `stack` is drained in place, LIFO, exactly like
+    before this was split out -- this function doesn't care whether it
+    was seeded with one fresh root frame or one frame resuming a
+    specific blocked path, the algorithm is identical either way, only
+    the starting point differs.
+
+    `states_before`/`flows_before`: baseline the max_states/max_flows
+    budgets count *up from* -- computed fresh at call time by the
+    caller, so a resumed continuation gets its own full budget starting
+    at 0, not the remainder of whatever the original pass had already
+    spent."""
+    def emit_flow(path: list[Transition], end_fp: str, forced_status: FlowStatus | None = None,
+                  extra_reason: str = "", resumable: bool = False) -> Flow:
+        seq = tuple(t.action_norm_signature for t in path)
+        status = forced_status
+        dup_of = None
+        reason = extra_reason
+        if status is None:
+            if seq in seq_to_flow_id:
+                status = FlowStatus.DUPLICATE
+                dup_of = seq_to_flow_id[seq]
+                reason = "Same normalized action sequence as flow #%d (structural dedup: same steps, different data)" % dup_of
+            else:
+                status = FlowStatus.UNIQUE
+                seq_to_flow_id[seq] = next_flow_id[0]
+                reason = extra_reason or "New normalized action sequence"
+        flow = Flow(
+            id=next_flow_id[0], status=status, duplicate_of=dup_of, dedup_reason=reason,
+            transitions=list(path), end_state_fp=end_fp, persona=persona_name,
+            # Only meaningful (and only ever True) for a forced BLOCKED
+            # status -- a flow that completed normally or deduped has
+            # nothing to "resume". See Flow.resumable's own docstring
+            # for which BLOCKED reasons qualify and why.
+            resumable=resumable and status == FlowStatus.BLOCKED,
+        )
+        next_flow_id[0] += 1
+        run.flows.append(flow)
+        return flow
+
+    while stack:
+        if len(run.flows) - flows_before >= max_flows:
+            # Silent truncation, until Aug 2026: this used to just
+            # `break`, abandoning every remaining stack frame with no
+            # record anywhere -- no blocked flow, no skipped
+            # candidate, no checkpoint. A run that stopped here looked
+            # byte-for-byte like a run that finished naturally.
+            # Found while measuring depth budgets: raising max_depth
+            # past 14 changed nothing on saucedemo, because max_flows
+            # (not depth) had silently become the binding constraint
+            # and nothing said so. Same fix as max_depth truncation
+            # above -- a checkpoint (not a flow, since the abandoned
+            # frames aren't paths anyone walked) naming exactly how
+            # much was left unexplored.
+            unexplored_states = len(stack)
+            unexplored_actions = sum(len(f.order) - f.pos for f in stack)
+            run.checkpoints.append(Checkpoint(
+                kind="blocked", flow_id=None, state_fp=None,
+                message=f"Crawl stopped early: max_flows limit ({max_flows}) reached"
+                        + (f" for persona '{persona_name}'" if show_persona_suffix else ""),
+                detail=f"{unexplored_states} state(s) were still queued for exploration, with "
+                       f"{unexplored_actions} candidate action(s) never tried. Raise max_flows to "
+                       f"continue past this point -- the flows reported here are a prefix of what "
+                       f"this config would eventually find, not the complete picture.",
+            ))
+            break
+        frame = stack[-1]
+        node = run.states[frame.fp]
+
+        if frame.pos >= len(frame.order) or len(frame.path) >= max_depth:
+            # Two genuinely different situations used to collapse into
+            # one -- "ran out of things to try" (frame.pos exhausted,
+            # a real dead end) and "there were more candidates, but
+            # max_depth was hit before trying them" (budget, not a
+            # dead end) produced the exact same flow status and the
+            # exact same generic "New normalized action sequence"
+            # reason, with nothing anywhere recording which one
+            # happened. A user had no way to tell "this flow is
+            # complete" from "this flow was cut short and might have
+            # continued" -- found by a user asking exactly that
+            # question about a real run. depth_truncated distinguishes
+            # them the same way max_states truncation already does
+            # below: forced BLOCKED status, an explicit "Truncated"
+            # reason, and the untried candidates recorded in
+            # skipped_candidates so the report's Safety register shows
+            # precisely what was never even attempted, not just that
+            # something was.
+            depth_truncated = len(frame.path) >= max_depth and frame.pos < len(frame.order)
+            if frame.path:
+                if depth_truncated:
+                    remaining = frame.order[frame.pos:]
+                    for i in remaining:
+                        c = node.candidates[i]
+                        run.skipped_candidates.append({
+                            "state_fp": frame.fp,
+                            "label": describe_action(json.loads(c.selector), None),
+                            "reason": "max_depth limit reached", "risk": c.risk.value,
+                        })
+                    emit_flow(frame.path, frame.fp, forced_status=FlowStatus.BLOCKED,
+                              extra_reason=f"Truncated: max_depth limit reached with "
+                                           f"{len(remaining)} further action(s) available from here, "
+                                           f"never tried",
+                              resumable=True)
+                elif not frame.any_followed and (frame.any_risk_skipped or frame.any_repeat_skipped):
+                    # Same "name what actually happened" discipline as
+                    # depth/max_flows truncation above -- a dead end
+                    # reached only because policy withheld every
+                    # remaining action reads identically to a genuine
+                    # dead end unless the reason is spelled out, and
+                    # the two withholding reasons (risk gating vs. the
+                    # repeat-action cap) are independent enough that a
+                    # frame can hit either, or both, at once.
+                    withheld_by = []
+                    if frame.any_risk_skipped:
+                        withheld_by.append("risk policy (destructive, or mutating with allow_mutating=false)")
+                    if frame.any_repeat_skipped:
+                        withheld_by.append(f"the action-repeat cap (max_action_repeat={max_action_repeat})")
+                    emit_flow(frame.path, frame.fp, forced_status=FlowStatus.BLOCKED,
+                              extra_reason="Dead end: remaining actions were withheld by "
+                                           + " and ".join(withheld_by),
+                              resumable=True)
+                else:
+                    emit_flow(frame.path, frame.fp)
+            stack.pop()
+            continue
+
+        cand_idx = frame.order[frame.pos]
+        frame.pos += 1
+        candidate = node.candidates[cand_idx]
+
+        if candidate.risk == Risk.DESTRUCTIVE:
+            frame.any_risk_skipped = True
+            run.skipped_candidates.append({
+                "state_fp": frame.fp, "label": describe_action(json.loads(candidate.selector), None),
+                "reason": candidate.risk_reason, "risk": "destructive",
+            })
+            continue
+        if candidate.risk == Risk.MUTATING and not allow_mutating:
+            frame.any_risk_skipped = True
+            run.skipped_candidates.append({
+                "state_fp": frame.fp, "label": describe_action(json.loads(candidate.selector), None),
+                "reason": "mutating action withheld (allow_mutating=false)", "risk": "mutating",
+            })
+            continue
+
+        # Repeat-action cap: how many times has THIS normalized action
+        # already been performed earlier in this same path (not
+        # per-state -- across the whole walk from root)? Targets the
+        # actual combinatorial-growth case directly: repeatedly
+        # clicking "add-to-cart-*" on different products all
+        # normalize to the same signature (known_prefixes in
+        # fingerprint.py), and each one opens a genuinely new state
+        # (the cart's own candidate list includes the item), so
+        # nothing else already caps this growth at its source --
+        # max_depth only bounds it indirectly, by being high enough
+        # to *tolerate* the blow-up before reaching anything past
+        # it. is_choice actions (select/radio/checkbox) are
+        # unaffected in practice: their norm_signature is kept
+        # maximally distinct per option specifically so it's never
+        # generalized (see fingerprint.py's "choice-" early return),
+        # so the same one only ever repeats if a path genuinely
+        # revisits the identical option, which this cap correctly
+        # still allows twice before withholding.
+        repeat_count = sum(1 for t in frame.path if t.action_norm_signature == candidate.norm_signature)
+        if repeat_count >= max_action_repeat:
+            frame.any_repeat_skipped = True
+            run.skipped_candidates.append({
+                "state_fp": frame.fp, "label": describe_action(json.loads(candidate.selector), None),
+                "reason": f"action-repeat cap reached ({repeat_count}x '{candidate.norm_signature}' "
+                          f"already performed earlier in this path)",
+                "risk": candidate.risk.value,
+            })
+            continue
+
+        el_meta = json.loads(candidate.selector)
+        trial = Transition(from_fp=frame.fp, to_fp=None, action_label=describe_action(el_meta, None),
+                            action_norm_signature=candidate.norm_signature, risk=candidate.risk,
+                            risk_reason=candidate.risk_reason, replay_meta=candidate.selector,
+                            is_choice=candidate.is_choice)
+        result = _run_path(browser, config, frame.path + [trial], run, credentials)
+        frame.any_followed = True
+
+        if result is None:
+            # Found while building gap_analysis.py's action-pool
+            # broadening (Aug 2026): trial.outcome was never set
+            # here at all, silently staying at its dataclass
+            # default "ok" -- meaning report.py's own `elif
+            # t.outcome == "error":` rendering (a red step-error
+            # note with the exception detail) was dead code, and
+            # a flow's failed final step rendered identically to
+            # a normal successful one. _run_path() always appends
+            # exactly one Checkpoint right before returning None
+            # (its only return-None path), so this is always the
+            # matching detail, not a guess.
+            trial.outcome = "error"
+            trial.detail = run.checkpoints[-1].detail if run.checkpoints else ""
+            emit_flow(frame.path + [trial], end_fp=frame.fp, forced_status=FlowStatus.BLOCKED,
+                      extra_reason=f"Terminated: action '{trial.action_label}' raised an error")
+            continue
+
+        new_fp, url_pat, title, new_candidates, fill_summary, new_unclassified, new_disabled, choice_state = result
+        # choice_state (radio/checkbox selections observed at submit time) is
+        # merged into the label for human/gap-analysis visibility only -- it
+        # must never reach trial.form_fields, since M4's codegen turns that
+        # into .fill() calls and .fill() raises on a radio/checkbox input.
+        label_fields = {**(fill_summary or {}), **(choice_state or {})}
+        trial.action_label = describe_action(el_meta, label_fields or None)
+        if fill_summary:
+            trial.form_fields = list(fill_summary.keys())
+        trial.to_fp = new_fp
+        trial.outcome = "revisit" if new_fp in run.states else "ok"
+        new_path = frame.path + [trial]
+
+        if new_fp in run.states:
+            # Learned live, for _order_for()'s benefit on every node
+            # discovered from here on in this persona's pass: this
+            # exact action, taken from this exact state, produced no
+            # new information. Recorded by norm_signature (not tied
+            # to this one state) because the same signature reaching
+            # an already-known state once is real evidence it's
+            # likely to again -- confirmed on real data before this
+            # existed (add-to-cart/checkout/remove/cancel all showed
+            # up as revisit-producers, not just UI-chrome toggles).
+            revisit_history.add(candidate.norm_signature)
+            emit_flow(new_path, end_fp=new_fp)
+            continue
+
+        if len(run.states) - states_before >= max_states:
+            run.skipped_candidates.append({
+                "state_fp": frame.fp, "label": trial.action_label,
+                "reason": "max_states limit reached", "risk": candidate.risk.value,
+            })
+            emit_flow(new_path, end_fp=new_fp, forced_status=FlowStatus.BLOCKED,
+                      extra_reason="Truncated: max_states limit reached before this state could be explored")
+            continue
+
+        new_node = StateNode(fingerprint=new_fp, url_pattern=url_pat, raw_url="",
+                              title=title, candidates=new_candidates,
+                              discovered_by_flow=next_flow_id[0],
+                              unclassified_interactive=new_unclassified,
+                              disabled_interactive=new_disabled)
+        run.states[new_fp] = new_node
+        child = _Frame(fp=new_fp, path=new_path)
+        child.order = _order_for(new_node, max_breadth, run, revisit_history)
+        stack.append(child)
+
+
 def crawl(config: dict) -> RunResult:
     from playwright.sync_api import sync_playwright
 
@@ -229,29 +485,6 @@ def crawl(config: dict) -> RunResult:
             # _order_for()'s own docstring for what this is used for.
             revisit_history: set[str] = set()
 
-            def emit_flow(path: list[Transition], end_fp: str, forced_status: FlowStatus | None = None,
-                          extra_reason: str = "", _seq=seq_to_flow_id, _persona=persona_name) -> Flow:
-                seq = tuple(t.action_norm_signature for t in path)
-                status = forced_status
-                dup_of = None
-                reason = extra_reason
-                if status is None:
-                    if seq in _seq:
-                        status = FlowStatus.DUPLICATE
-                        dup_of = _seq[seq]
-                        reason = "Same normalized action sequence as flow #%d (structural dedup: same steps, different data)" % dup_of
-                    else:
-                        status = FlowStatus.UNIQUE
-                        _seq[seq] = next_flow_id[0]
-                        reason = extra_reason or "New normalized action sequence"
-                flow = Flow(
-                    id=next_flow_id[0], status=status, duplicate_of=dup_of, dedup_reason=reason,
-                    transitions=list(path), end_state_fp=end_fp, persona=_persona,
-                )
-                next_flow_id[0] += 1
-                run.flows.append(flow)
-                return flow
-
             if root_fp is None:
                 # Only the very first persona actually visits start_url --
                 # an empty path never calls perform_action at all, so this
@@ -278,209 +511,10 @@ def crawl(config: dict) -> RunResult:
             states_before = len(run.states)
             flows_before = len(run.flows)
 
-            while stack:
-                if len(run.flows) - flows_before >= max_flows:
-                    # Silent truncation, until Aug 2026: this used to just
-                    # `break`, abandoning every remaining stack frame with no
-                    # record anywhere -- no blocked flow, no skipped
-                    # candidate, no checkpoint. A run that stopped here looked
-                    # byte-for-byte like a run that finished naturally.
-                    # Found while measuring depth budgets: raising max_depth
-                    # past 14 changed nothing on saucedemo, because max_flows
-                    # (not depth) had silently become the binding constraint
-                    # and nothing said so. Same fix as max_depth truncation
-                    # above -- a checkpoint (not a flow, since the abandoned
-                    # frames aren't paths anyone walked) naming exactly how
-                    # much was left unexplored.
-                    unexplored_states = len(stack)
-                    unexplored_actions = sum(len(f.order) - f.pos for f in stack)
-                    run.checkpoints.append(Checkpoint(
-                        kind="blocked", flow_id=None, state_fp=None,
-                        message=f"Crawl stopped early: max_flows limit ({max_flows}) reached"
-                                + (f" for persona '{persona_name}'" if len(personas) > 1 else ""),
-                        detail=f"{unexplored_states} state(s) were still queued for exploration, with "
-                               f"{unexplored_actions} candidate action(s) never tried. Raise max_flows to "
-                               f"continue past this point -- the flows reported here are a prefix of what "
-                               f"this config would eventually find, not the complete picture.",
-                    ))
-                    break
-                frame = stack[-1]
-                node = run.states[frame.fp]
-
-                if frame.pos >= len(frame.order) or len(frame.path) >= max_depth:
-                    # Two genuinely different situations used to collapse into
-                    # one -- "ran out of things to try" (frame.pos exhausted,
-                    # a real dead end) and "there were more candidates, but
-                    # max_depth was hit before trying them" (budget, not a
-                    # dead end) produced the exact same flow status and the
-                    # exact same generic "New normalized action sequence"
-                    # reason, with nothing anywhere recording which one
-                    # happened. A user had no way to tell "this flow is
-                    # complete" from "this flow was cut short and might have
-                    # continued" -- found by a user asking exactly that
-                    # question about a real run. depth_truncated distinguishes
-                    # them the same way max_states truncation already does
-                    # below: forced BLOCKED status, an explicit "Truncated"
-                    # reason, and the untried candidates recorded in
-                    # skipped_candidates so the report's Safety register shows
-                    # precisely what was never even attempted, not just that
-                    # something was.
-                    depth_truncated = len(frame.path) >= max_depth and frame.pos < len(frame.order)
-                    if frame.path:
-                        if depth_truncated:
-                            remaining = frame.order[frame.pos:]
-                            for i in remaining:
-                                c = node.candidates[i]
-                                run.skipped_candidates.append({
-                                    "state_fp": frame.fp,
-                                    "label": describe_action(json.loads(c.selector), None),
-                                    "reason": "max_depth limit reached", "risk": c.risk.value,
-                                })
-                            emit_flow(frame.path, frame.fp, forced_status=FlowStatus.BLOCKED,
-                                      extra_reason=f"Truncated: max_depth limit reached with "
-                                                   f"{len(remaining)} further action(s) available from here, "
-                                                   f"never tried")
-                        elif not frame.any_followed and (frame.any_risk_skipped or frame.any_repeat_skipped):
-                            # Same "name what actually happened" discipline as
-                            # depth/max_flows truncation above -- a dead end
-                            # reached only because policy withheld every
-                            # remaining action reads identically to a genuine
-                            # dead end unless the reason is spelled out, and
-                            # the two withholding reasons (risk gating vs. the
-                            # repeat-action cap) are independent enough that a
-                            # frame can hit either, or both, at once.
-                            withheld_by = []
-                            if frame.any_risk_skipped:
-                                withheld_by.append("risk policy (destructive, or mutating with allow_mutating=false)")
-                            if frame.any_repeat_skipped:
-                                withheld_by.append(f"the action-repeat cap (max_action_repeat={max_action_repeat})")
-                            emit_flow(frame.path, frame.fp, forced_status=FlowStatus.BLOCKED,
-                                      extra_reason="Dead end: remaining actions were withheld by "
-                                                   + " and ".join(withheld_by))
-                        else:
-                            emit_flow(frame.path, frame.fp)
-                    stack.pop()
-                    continue
-
-                cand_idx = frame.order[frame.pos]
-                frame.pos += 1
-                candidate = node.candidates[cand_idx]
-
-                if candidate.risk == Risk.DESTRUCTIVE:
-                    frame.any_risk_skipped = True
-                    run.skipped_candidates.append({
-                        "state_fp": frame.fp, "label": describe_action(json.loads(candidate.selector), None),
-                        "reason": candidate.risk_reason, "risk": "destructive",
-                    })
-                    continue
-                if candidate.risk == Risk.MUTATING and not allow_mutating:
-                    frame.any_risk_skipped = True
-                    run.skipped_candidates.append({
-                        "state_fp": frame.fp, "label": describe_action(json.loads(candidate.selector), None),
-                        "reason": "mutating action withheld (allow_mutating=false)", "risk": "mutating",
-                    })
-                    continue
-
-                # Repeat-action cap: how many times has THIS normalized action
-                # already been performed earlier in this same path (not
-                # per-state -- across the whole walk from root)? Targets the
-                # actual combinatorial-growth case directly: repeatedly
-                # clicking "add-to-cart-*" on different products all
-                # normalize to the same signature (known_prefixes in
-                # fingerprint.py), and each one opens a genuinely new state
-                # (the cart's own candidate list includes the item), so
-                # nothing else already caps this growth at its source --
-                # max_depth only bounds it indirectly, by being high enough
-                # to *tolerate* the blow-up before reaching anything past
-                # it. is_choice actions (select/radio/checkbox) are
-                # unaffected in practice: their norm_signature is kept
-                # maximally distinct per option specifically so it's never
-                # generalized (see fingerprint.py's "choice-" early return),
-                # so the same one only ever repeats if a path genuinely
-                # revisits the identical option, which this cap correctly
-                # still allows twice before withholding.
-                repeat_count = sum(1 for t in frame.path if t.action_norm_signature == candidate.norm_signature)
-                if repeat_count >= max_action_repeat:
-                    frame.any_repeat_skipped = True
-                    run.skipped_candidates.append({
-                        "state_fp": frame.fp, "label": describe_action(json.loads(candidate.selector), None),
-                        "reason": f"action-repeat cap reached ({repeat_count}x '{candidate.norm_signature}' "
-                                  f"already performed earlier in this path)",
-                        "risk": candidate.risk.value,
-                    })
-                    continue
-
-                el_meta = json.loads(candidate.selector)
-                trial = Transition(from_fp=frame.fp, to_fp=None, action_label=describe_action(el_meta, None),
-                                    action_norm_signature=candidate.norm_signature, risk=candidate.risk,
-                                    risk_reason=candidate.risk_reason, replay_meta=candidate.selector,
-                                    is_choice=candidate.is_choice)
-                result = _run_path(browser, config, frame.path + [trial], run, credentials)
-                frame.any_followed = True
-
-                if result is None:
-                    # Found while building gap_analysis.py's action-pool
-                    # broadening (Aug 2026): trial.outcome was never set
-                    # here at all, silently staying at its dataclass
-                    # default "ok" -- meaning report.py's own `elif
-                    # t.outcome == "error":` rendering (a red step-error
-                    # note with the exception detail) was dead code, and
-                    # a flow's failed final step rendered identically to
-                    # a normal successful one. _run_path() always appends
-                    # exactly one Checkpoint right before returning None
-                    # (its only return-None path), so this is always the
-                    # matching detail, not a guess.
-                    trial.outcome = "error"
-                    trial.detail = run.checkpoints[-1].detail if run.checkpoints else ""
-                    emit_flow(frame.path + [trial], end_fp=frame.fp, forced_status=FlowStatus.BLOCKED,
-                              extra_reason=f"Terminated: action '{trial.action_label}' raised an error")
-                    continue
-
-                new_fp, url_pat, title, new_candidates, fill_summary, new_unclassified, new_disabled, choice_state = result
-                # choice_state (radio/checkbox selections observed at submit time) is
-                # merged into the label for human/gap-analysis visibility only -- it
-                # must never reach trial.form_fields, since M4's codegen turns that
-                # into .fill() calls and .fill() raises on a radio/checkbox input.
-                label_fields = {**(fill_summary or {}), **(choice_state or {})}
-                trial.action_label = describe_action(el_meta, label_fields or None)
-                if fill_summary:
-                    trial.form_fields = list(fill_summary.keys())
-                trial.to_fp = new_fp
-                trial.outcome = "revisit" if new_fp in run.states else "ok"
-                new_path = frame.path + [trial]
-
-                if new_fp in run.states:
-                    # Learned live, for _order_for()'s benefit on every node
-                    # discovered from here on in this persona's pass: this
-                    # exact action, taken from this exact state, produced no
-                    # new information. Recorded by norm_signature (not tied
-                    # to this one state) because the same signature reaching
-                    # an already-known state once is real evidence it's
-                    # likely to again -- confirmed on real data before this
-                    # existed (add-to-cart/checkout/remove/cancel all showed
-                    # up as revisit-producers, not just UI-chrome toggles).
-                    revisit_history.add(candidate.norm_signature)
-                    emit_flow(new_path, end_fp=new_fp)
-                    continue
-
-                if len(run.states) - states_before >= max_states:
-                    run.skipped_candidates.append({
-                        "state_fp": frame.fp, "label": trial.action_label,
-                        "reason": "max_states limit reached", "risk": candidate.risk.value,
-                    })
-                    emit_flow(new_path, end_fp=new_fp, forced_status=FlowStatus.BLOCKED,
-                              extra_reason="Truncated: max_states limit reached before this state could be explored")
-                    continue
-
-                new_node = StateNode(fingerprint=new_fp, url_pattern=url_pat, raw_url="",
-                                      title=title, candidates=new_candidates,
-                                      discovered_by_flow=next_flow_id[0],
-                                      unclassified_interactive=new_unclassified,
-                                      disabled_interactive=new_disabled)
-                run.states[new_fp] = new_node
-                child = _Frame(fp=new_fp, path=new_path)
-                child.order = _order_for(new_node, max_breadth, run, revisit_history)
-                stack.append(child)
+            _run_dfs(browser, config, run, credentials, persona_name, stack, next_flow_id,
+                     max_depth, max_breadth, max_states, max_flows, max_action_repeat, allow_mutating,
+                     states_before, flows_before, len(personas) > 1,
+                     seq_to_flow_id, revisit_history)
 
         browser.close()
 
@@ -495,3 +529,77 @@ def crawl(config: dict) -> RunResult:
 
     run.finished_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     return run
+
+
+def resume_flow(run: RunResult, flow: Flow, limit_overrides: dict, credentials: dict) -> None:
+    """Continue exploring from where one specific BLOCKED flow left off,
+    instead of re-crawling the whole config from start_url. Mutates
+    `run` in place -- new states/flows/checkpoints/skipped_candidates
+    get appended, exactly as if the original DFS stack had kept going
+    past this one flow's stopping point instead of stopping there.
+
+    Only meaningful for `flow.resumable` flows -- see its own docstring
+    for exactly which BLOCKED reasons qualify (max_depth truncation, or
+    a dead end from risk-policy/repeat-cap withholding: both anchored to
+    THIS flow's own path). max_states/max_flows truncation isn't tied to
+    any one flow, so there's nothing here to resume for those -- the
+    honest fix is a full re-crawl with a higher limit.
+
+    `limit_overrides`: a partial `limits` dict (e.g. just
+    `{"max_depth": 12}`) merged over the run's own original limits, plus
+    an optional `"allow_mutating"` key (not nested under `limits` in the
+    config schema -- see crawl() -- accepted the same way here, applied
+    to a top-level override instead). Reuses the exact replay mechanism
+    backtracking already relies on: `flow.transitions` already carries
+    each step's `replay_meta`, and `run.states[flow.end_state_fp]` (from
+    the original crawl) is reused as-is, not re-discovered -- the same
+    "trust what's already known, don't re-earn it" reasoning
+    `_run_path()`'s own replay-from-root already runs on for every DFS
+    step, just anchored at a later point instead of the root."""
+    if not flow.resumable:
+        raise ValueError(f"flow #{flow.id} is not resumable (status={flow.status.value}: {flow.dedup_reason})")
+    node = run.states.get(flow.end_state_fp)
+    if node is None:
+        raise ValueError(f"flow #{flow.id}'s end state is missing from this run's state graph")
+
+    from playwright.sync_api import sync_playwright
+
+    limits = {**run.config.get("limits", {}), **{k: v for k, v in limit_overrides.items() if k != "allow_mutating"}}
+    max_depth = limits["max_depth"]
+    max_breadth = limits["max_breadth_per_state"]
+    max_states = limits["max_states"]
+    max_flows = limits["max_flows"]
+    max_action_repeat = limits.get("max_action_repeat", 2)
+    allow_mutating = limit_overrides.get("allow_mutating", run.config.get("allow_mutating", True))
+
+    # Local only -- run.config stays an honest record of how the
+    # original crawl was actually configured; a resume's own
+    # (potentially different) limits are never written back into it.
+    config = {**run.config, "limits": limits, "allow_mutating": allow_mutating}
+
+    next_flow_id = [max((f.id for f in run.flows), default=0) + 1]
+    seq_to_flow_id: dict[tuple, int] = {}
+    revisit_history: set[str] = set()
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        try:
+            frame = _Frame(fp=flow.end_state_fp, path=list(flow.transitions))
+            frame.order = _order_for(node, max_breadth, run, revisit_history)
+            stack: list[_Frame] = [frame]
+
+            states_before = len(run.states)
+            flows_before = len(run.flows)
+
+            _run_dfs(browser, config, run, credentials, flow.persona, stack, next_flow_id,
+                     max_depth, max_breadth, max_states, max_flows, max_action_repeat, allow_mutating,
+                     states_before, flows_before, False, seq_to_flow_id, revisit_history)
+        finally:
+            browser.close()
+
+    sem_cfg = run.config.get("semantic_dedup", {})
+    if sem_cfg.get("enabled", True):
+        try:
+            apply_semantic_dedup(run, threshold=sem_cfg.get("threshold", DEFAULT_THRESHOLD))
+        except Exception as exc:  # never let a dedup-pass bug take down an otherwise-successful resume
+            run.semantic_dedup_status = f"error on resume: {exc}"

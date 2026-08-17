@@ -21,7 +21,7 @@ from typing import Optional
 
 from .. import project_state as project_state_module
 from ..change_detection import detect_changes
-from ..crawler import crawl
+from ..crawler import crawl, resume_flow
 from ..gap_analysis import DEFAULT_THRESHOLD, analyze_gaps
 from ..models import ChangeEvent, ChangeReport, GapAnalysis, RunResult
 from ..report import render_html
@@ -101,7 +101,7 @@ def _execute(run_id: str, config: dict, tcms_path: Optional[str] = None,
             except Exception as exc:
                 handle.gap_error = str(exc)[:500]
 
-        (out_dir / "report.html").write_text(render_html(run, gap, changes), encoding="utf-8")
+        (out_dir / "report.html").write_text(render_html(run, gap, changes, run_id=run_id), encoding="utf-8")
         project_state_module.record_run(run, run_id=run_id)
         handle.summary = run.summary()
         handle.status = "done"
@@ -268,8 +268,65 @@ def run_gap_analysis(run_id: str, tcms_path: str, threshold: float = DEFAULT_THR
     # Regenerating report.html here shouldn't silently drop a change-report
     # section the original crawl already produced.
     changes = _load_change_report(out_dir)
-    (out_dir / "report.html").write_text(render_html(run, gap, changes), encoding="utf-8")
+    (out_dir / "report.html").write_text(render_html(run, gap, changes, run_id=run_id), encoding="utf-8")
     return gap
+
+
+def _credentials_for_persona(config: dict, persona_name: str) -> dict:
+    personas = config.get("personas")
+    if personas:
+        for p in personas:
+            if p.get("name", "default") == persona_name:
+                return p.get("credentials", {})
+    return config.get("credentials", {})
+
+
+def resume_flow_in_run(run_id: str, flow_id: int, limit_overrides: dict) -> RunResult:
+    """Loads a completed run from disk, continues exploring from one
+    specific BLOCKED (resumable) flow with adjusted limits (see
+    crawler.resume_flow), and writes the result back in place -- same
+    flows.json/report.html, extended rather than replaced (the original
+    blocked flow stays as-is; new flows/states get appended).
+
+    Synchronous, unlike start_run()'s background-thread + poll pattern:
+    a resume continues from ONE already-reached state, not a whole site
+    from scratch, so it's expected to be much shorter -- if that turns
+    out wrong in practice, that's a real measurement to revisit this
+    with, not a guess to build ahead of. The web layer awaits this via
+    asyncio.to_thread (same pattern /api/detect-fields already uses for
+    a similarly one-shot, synchronous Playwright call)."""
+    out_dir = get_run_dir(run_id)
+    flows_path = out_dir / "flows.json"
+    if not flows_path.exists():
+        raise FileNotFoundError(f"no completed run at {run_id}")
+    run = RunResult.from_json(json.loads(flows_path.read_text(encoding="utf-8")))
+
+    flow = next((f for f in run.flows if f.id == flow_id), None)
+    if flow is None:
+        raise ValueError(f"no flow #{flow_id} in run {run_id}")
+
+    credentials = _credentials_for_persona(run.config, flow.persona)
+    resume_flow(run, flow, limit_overrides, credentials)
+
+    flows_path.write_text(json.dumps(run.to_json(), indent=2), encoding="utf-8")
+
+    # Gap analysis, if this run had one, is now stale relative to the
+    # flows resume_flow() just added -- the original TCMS file isn't
+    # kept around after the initial run (see _execute's own cleanup in
+    # this file), so it can't be silently re-run here. Kept visible
+    # rather than dropped (GapAnalysis.from_json), with the status line
+    # saying so explicitly; a fresh POST /api/runs/{id}/gap re-attaches
+    # a current one when the operator wants it.
+    gap: Optional[GapAnalysis] = None
+    gap_path = out_dir / "gap_analysis.json"
+    if gap_path.exists():
+        gap = GapAnalysis.from_json(json.loads(gap_path.read_text(encoding="utf-8")))
+        gap.status += (" (stale: this run was extended by resuming a flow since this gap "
+                        "analysis ran -- re-upload the TCMS to refresh it)")
+
+    changes = _load_change_report(out_dir)
+    (out_dir / "report.html").write_text(render_html(run, gap, changes, run_id=run_id), encoding="utf-8")
+    return run
 
 
 def confirm_tcms_link(project: str, identity: str, tcms_id: str) -> None:

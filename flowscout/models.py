@@ -114,6 +114,17 @@ class Flow:
     # NOT the same flow, since what they were *allowed* to do getting
     # there is the thing being tested.
     persona: str = "default"
+    # True only for BLOCKED flows cut short by a budget anchored to THIS
+    # flow's own path (max_depth, or a dead end from risk-policy/repeat-
+    # cap withholding) -- see crawler.py's emit_flow(). Deliberately
+    # False for max_states/max_flows truncation: those are whole-run
+    # budgets, not tied to any one flow, so "resume just this flow with
+    # a bigger number" wouldn't address what actually blocked it -- the
+    # honest fix there is a full re-crawl with a higher limit, not a
+    # targeted continuation. Also False for a genuine error ("Terminated:
+    # action ... raised an error") -- the action itself failed, more
+    # budget doesn't fix that.
+    resumable: bool = False
 
     def action_sequence(self) -> list[str]:
         return [t.action_norm_signature for t in self.transitions]
@@ -190,6 +201,7 @@ class RunResult:
                 id=f["id"], status=FlowStatus(f["status"]), duplicate_of=f.get("duplicate_of"),
                 dedup_reason=f.get("dedup_reason", ""), transitions=transitions,
                 end_state_fp=f.get("end_state_fp", ""), persona=f.get("persona", "default"),
+                resumable=f.get("resumable", False),
             ))
         for c in d.get("checkpoints", []):
             run.checkpoints.append(Checkpoint(**c))
@@ -326,6 +338,24 @@ class GapAnalysis:
             "tcms_coverage": [asdict(x) for x in self.tcms_coverage],
             "summary": self.summary(),
         }
+
+    @classmethod
+    def from_json(cls, d: dict) -> "GapAnalysis":
+        """Reconstruct from a saved gap_analysis.json -- both member
+        dataclasses (FlowCoverage, TcmsCoverage) are flat JSON-safe
+        fields already, so a plain **kwargs unpack is enough (unlike
+        RunResult.from_json's states/flows, which need real
+        reconstruction for their own nested types). Used when
+        re-rendering a report after resume_flow() extends a run's flows
+        without a fresh TCMS upload -- keeps whatever gap analysis
+        already existed visible rather than silently dropping it, even
+        though it's now stale relative to the newly-added flows (see
+        web/runs.py's own note on this at the resume call site)."""
+        return cls(
+            tcms_source=d["tcms_source"], threshold=d["threshold"], status=d["status"],
+            flow_coverage=[FlowCoverage(**x) for x in d.get("flow_coverage", [])],
+            tcms_coverage=[TcmsCoverage(**x) for x in d.get("tcms_coverage", [])],
+        )
 
 
 @dataclass

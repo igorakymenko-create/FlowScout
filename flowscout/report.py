@@ -47,7 +47,29 @@ def _flow_steps_html(flow, states: dict) -> str:
     return "<ol class=\"steps\">" + "".join(parts) + "</ol>"
 
 
-def _flow_card_html(flow, states: dict, show_persona: bool = False) -> str:
+def _resume_box_html(flow, run_id: str, default_allow_mutating: bool) -> str:
+    # Only rendered when both a run_id (this report is being served by
+    # the web UI, not a standalone CLI --out file with no server behind
+    # it to call) and flow.resumable (see its own docstring for exactly
+    # which BLOCKED reasons qualify) are true. The two fields cover the
+    # two per-flow-anchored reasons uniformly rather than branching the
+    # UI on which one this particular flow hit -- raising depth doesn't
+    # hurt a repeat-cap/risk-policy dead end, it just may not be the
+    # fix either, and the operator can see which applies from the
+    # reason text printed right above this box.
+    suggested_depth = len(flow.transitions) + 5
+    mutating_checked = "checked" if default_allow_mutating else ""
+    return f"""
+          <div class="resume-box">
+            <label>Max depth <input type="number" class="resume-depth" value="{suggested_depth}" min="{len(flow.transitions) + 1}" style="width:64px"></label>
+            <label><input type="checkbox" class="resume-mutating" {mutating_checked}> Allow mutating</label>
+            <button type="button" onclick="flowscoutResume('{_esc(run_id)}', {flow.id}, this)">Resume this flow</button>
+            <span class="resume-status"></span>
+          </div>"""
+
+
+def _flow_card_html(flow, states: dict, show_persona: bool = False,
+                     run_id: str | None = None, default_allow_mutating: bool = True) -> str:
     status_label, status_class = _STATUS_META[flow.status]
     end_state = states.get(flow.end_state_fp)
     end_url = _esc(end_state.url_pattern) if end_state else "?"
@@ -55,6 +77,8 @@ def _flow_card_html(flow, states: dict, show_persona: bool = False) -> str:
     # a single-persona run's every card would otherwise say "default",
     # noise with nothing to distinguish it from.
     persona_html = f'<span class="risk-chip risk-neutral">{_esc(flow.persona)}</span>' if show_persona else ""
+    resume_html = (_resume_box_html(flow, run_id, default_allow_mutating)
+                   if run_id and flow.resumable else "")
     return f"""
         <article class="flow-card">
           <header class="flow-head">
@@ -66,10 +90,11 @@ def _flow_card_html(flow, states: dict, show_persona: bool = False) -> str:
           </header>
           {_flow_steps_html(flow, states)}
           <p class="flow-reason">{_esc(flow.dedup_reason)}</p>
+          {resume_html}
         </article>"""
 
 
-def _flows_html(run: RunResult) -> str:
+def _flows_html(run: RunResult, run_id: str | None = None) -> str:
     # Unique (and blocked -- these need a look too, they're not redundant,
     # they're incomplete) lead the list, fully visible. Duplicates are real
     # findings worth keeping -- each still carries its own reasoning -- but
@@ -79,13 +104,16 @@ def _flows_html(run: RunResult) -> str:
     lead = [f for f in run.flows if f.status in (FlowStatus.UNIQUE, FlowStatus.BLOCKED)]
     duplicates = [f for f in run.flows if f.status == FlowStatus.DUPLICATE]
     show_persona = len({f.persona for f in run.flows}) > 1
+    default_allow_mutating = bool(run.config.get("allow_mutating", True))
 
-    lead_html = "\n".join(_flow_card_html(f, run.states, show_persona) for f in lead)
+    lead_html = "\n".join(_flow_card_html(f, run.states, show_persona, run_id, default_allow_mutating)
+                           for f in lead)
     if not duplicates:
         return lead_html
 
     n = len(duplicates)
-    dup_cards = "\n".join(_flow_card_html(f, run.states, show_persona) for f in duplicates)
+    dup_cards = "\n".join(_flow_card_html(f, run.states, show_persona, run_id, default_allow_mutating)
+                           for f in duplicates)
     return f"""{lead_html}
         <details class="dup-details">
           <summary class="dup-summary">Show {n} duplicate flow{'s' if n != 1 else ''} — each still shows its own dedup reasoning</summary>
@@ -459,9 +487,51 @@ def _checkpoints_html(run: RunResult) -> str:
     return f'<ul class="checkpoints">{"".join(rows)}</ul>'
 
 
-def render_html(run: RunResult, gap: GapAnalysis | None = None, changes: ChangeReport | None = None) -> str:
+def _resume_script_html() -> str:
+    # The report's only interactive JS (Aug 2026) -- everything else in
+    # this file is genuinely static HTML. Only emitted when render_html
+    # was given a run_id (see its own docstring), so a standalone CLI
+    # report never carries dead code with nothing to call.
+    return """
+<script>
+async function flowscoutResume(runId, flowId, btn) {
+  const box = btn.closest('.resume-box');
+  const depth = Number(box.querySelector('.resume-depth').value);
+  const allowMutating = box.querySelector('.resume-mutating').checked;
+  const statusEl = box.querySelector('.resume-status');
+  btn.disabled = true;
+  statusEl.textContent = 'Resuming…';
+  try {
+    const res = await fetch(`/api/runs/${runId}/resume`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({flow_id: flowId, limits: {max_depth: depth, allow_mutating: allowMutating}}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      statusEl.textContent = 'Failed: ' + (data.detail || res.statusText);
+      btn.disabled = false;
+      return;
+    }
+    statusEl.textContent = 'Done — reloading…';
+    window.location.reload();
+  } catch (e) {
+    statusEl.textContent = 'Failed: ' + e;
+    btn.disabled = false;
+  }
+}
+</script>"""
+
+
+def render_html(run: RunResult, gap: GapAnalysis | None = None, changes: ChangeReport | None = None,
+                 run_id: str | None = None) -> str:
+    # run_id (Aug 2026): only known when this report is being served by
+    # the web UI (web/runs.py always passes it) -- a standalone report
+    # written by the CLI (`flowscout crawl --out ...`, no server behind
+    # it to call) has nothing to POST a resume request to, so the
+    # "Resume this flow" UI on BLOCKED cards is simply omitted rather
+    # than rendered non-functional.
     s = run.summary()
-    flows_html = _flows_html(run)
+    flows_html = _flows_html(run, run_id)
     gap_html = _gap_section_html(gap, run)
     change_html = _change_report_html(changes)
     states_html = _states_html(run)
@@ -565,6 +635,13 @@ h3 {{ font-size: 14.5px; font-weight: 600; margin: 1.5rem 0 .5rem; }}
 .step-note {{ font-size: 12px; color: var(--text-tertiary); }}
 .step-error {{ color: var(--sem-destructive); }}
 .flow-reason {{ margin: 10px 0 0; font-size: 12.5px; color: var(--text-tertiary); font-style: italic; }}
+.resume-box {{ margin: 10px 0 0; padding: 8px 10px; background: var(--surface-alt); border-radius: 6px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; }}
+.resume-box label {{ display: flex; align-items: center; gap: 4px; color: var(--text-secondary); }}
+.resume-box input[type="number"] {{ font: inherit; padding: 2px 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text-primary); }}
+.resume-box button {{ font: inherit; padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text-primary); cursor: pointer; }}
+.resume-box button:hover {{ border-color: var(--accent); }}
+.resume-box button:disabled {{ opacity: .6; cursor: default; }}
+.resume-status {{ color: var(--text-tertiary); }}
 
 .dup-details {{ margin-top: 12px; }}
 .dup-summary {{
@@ -679,5 +756,6 @@ a {{ color: var(--accent); }}
     Generated by FlowScout M0 · config: <span class="mono">{_esc(json.dumps({k: v for k, v in cfg.items() if k != 'credentials'}))}</span>
   </footer>
 </div>
+{_resume_script_html() if run_id else ""}
 </body>
 </html>"""

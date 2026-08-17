@@ -2428,3 +2428,128 @@ step-by-step sequence matching yet, so building the search machinery
 first would have produced something with nothing meaningful to search
 against. Worth revisiting if TCMS sources with real structured steps
 show up, not before.
+
+## Resume a specific blocked flow (done, Aug 2026)
+
+Asked directly: does the report mark flows that got cut short so an
+operator can see them, and could they edit a budget (e.g. max_depth)
+and re-run just that one flow to completion instead of the whole
+crawl? Marking was already comprehensive (see "Depth-truncation was
+invisible" above) -- every truncated/withheld flow already shows up in
+the report's lead list, not tucked away, with the exact reason on the
+card. Targeted continuation didn't exist at all.
+
+**Scoped to per-flow-anchored causes only, at the user's explicit
+choice.** `max_depth` truncation and a dead end from risk-policy/
+repeat-cap withholding are both genuinely anchored to one flow's own
+path (`frame.path` at the moment it happened) -- "keep going from
+exactly here with a different limit" is a coherent thing to ask for.
+`max_states`/`max_flows` truncation are whole-persona-pass budgets,
+not tied to any one flow -- resuming "just this flow" wouldn't address
+what actually blocked it; the honest fix there stays a full re-crawl
+with a higher limit. New `Flow.resumable: bool` (set only at the two
+qualifying `emit_flow()` call sites in crawler.py) marks the
+distinction explicitly, not inferred from parsing `dedup_reason` text.
+
+**Architecture: extracted the DFS loop, not duplicated it.** The
+highest-risk part of this by far -- the per-persona `while stack:`
+loop is the most load-bearing code in the project. Pulled out into
+`_run_dfs()` (browser, run, credentials, persona_name, a seed `stack`,
+`next_flow_id`, the limit values, and a `states_before`/`flows_before`
+baseline pair), called identically by `crawl()`'s own per-persona pass
+and the new `resume_flow()`. `resume_flow()` itself just seeds the
+stack differently: one `_Frame` at `flow.end_state_fp` with
+`path=list(flow.transitions)` (reusing the already-known StateNode and
+each transition's own `replay_meta` -- no re-discovery needed, the
+exact same "trust what backtracking already earned" reasoning
+`_run_path()`'s replay-from-root already runs on, just anchored later)
+instead of a fresh root frame, with `states_before`/`flows_before`
+computed fresh at resume time so the new limits get their own full
+budget, not whatever remained of the original pass's.
+
+**A real design question worked out by tracing the actual loop
+mechanics, not assumed:** does resuming risk re-trying candidates the
+original pass already tried from this exact frame? No -- traced
+directly: `len(frame.path)` is fixed for a frame's whole lifetime (only
+child frames get a longer path), so a depth-truncated frame *always*
+hits its limit at `frame.pos == 0` -- nothing was ever tried from it. A
+dead-end-withheld frame ran its `order` to completion but every
+candidate was withheld, never actually followed. Both cases mean a
+fresh `_Frame` with a fresh `_order_for()`-computed order and `pos=0`
+is exactly correct for resuming -- no double-counting, confirmed by
+reasoning about the loop's own invariants before trusting it.
+
+**`Flow.resumable` needed its own from_json fix, caught before it
+shipped, not after** -- the same class of bug this project has hit
+more than once now (StateNode.candidates, RunHandle.gap_error):
+`RunResult.from_json()` reconstructs `Flow` with named fields, not
+`Flow(**d)`, so a new dataclass field is silently dropped on every
+reload unless the reconstruction is updated too. Added
+`resumable=f.get("resumable", False)` explicitly rather than
+discovering the gap by a resumed-then-reloaded flow quietly losing its
+own resumability.
+
+**A genuinely new piece of surface for this report: its first
+interactive JS.** Every other section of `report.py` is static HTML --
+`render_html()` now takes an optional `run_id`, used only to decide
+whether to render a "Resume this flow" box (max-depth input, an
+allow-mutating checkbox defaulting to the run's own original setting,
+a button) on `resumable` cards, and only when one is given: a
+standalone CLI report (`flowscout crawl --out ...`, no server behind
+it) has nothing to `POST` a resume to, so the box -- and the one
+`<script>` block in the whole file -- is omitted entirely rather than
+shipped non-functional. Server side: `POST /api/runs/{run_id}/resume`
+(`web/app.py`) -> `runs_module.resume_flow_in_run()` (`web/runs.py`),
+synchronous (via `asyncio.to_thread`, the same pattern
+`/api/detect-fields` already uses for a comparably one-shot Playwright
+call) rather than start_run()'s background-thread-plus-poll pattern --
+a resume continues from one already-reached state, expected to be much
+shorter than a full crawl; a real measurement to revisit if that
+assumption turns out wrong, not a guess to build ahead of.
+
+**A real bug caught by clicking the actual button in a real browser,
+not just checking the HTML looked right.** First attempt: `flows.json`
+correctly showed the new flows on disk, but a real Playwright-driven
+click on "Resume this flow" followed by the page's own
+`window.location.reload()` kept showing the stale, pre-resume flow
+list. Diagnosed as browser caching (`GET /api/runs/{run_id}/report`
+carried no cache directive for genuinely dynamic content that changes
+under the same URL -- gap uploads, now resume) and fixed with
+`Cache-Control: no-store` on that endpoint -- but re-testing showed the
+*same* symptom, meaning the real cause was still unexplained. Traced
+further by reading the actual `.resume-status` text instead of
+trusting a page-title/URL proxy for "did it reload": it still read
+"Resuming…" -- the very first test's 3-second wait was simply shorter
+than a real server-side Playwright resume (browser launch + replay +
+further exploration) takes. Re-tested with real patience (polling up to
+90s): genuinely new flows (ids 21-35) appeared after a real click, on a
+real page, through a real reload. The `Cache-Control` fix stayed in --
+correct regardless of which bug actually explained the first failure,
+and it fixes the same staleness risk for every other consumer of that
+endpoint, not just this one call site.
+
+**Verified live, the whole chain, more than once:**
+- Direct function-level: `crawl()` on saucedemo with `max_depth=6`
+  produced 4 `resumable` flows; `resume_flow()` on one of them with
+  `{"max_depth": 12}` produced 7 new flows, several genuinely reaching
+  past the original 6-step cutoff (up to 8 steps, including `Finish`
+  and `Back Home` -- a real checkout completion the original crawl
+  never got to), state convergence and semantic dedup both correctly
+  ran on the new flows (one via each), and the original blocked flow
+  #6 stayed present, unmodified.
+- Through the real HTTP API against a running server: same result
+  (20 -> 27 flows, 13 -> 14 states), `flows.json`/`report.html` updated
+  on disk, confirmed via a fresh `GET`. Error cases checked the same
+  way: resuming a non-resumable (`UNIQUE`) flow -> `400` with the exact
+  reason; a nonexistent `flow_id` -> `400`; a nonexistent `run_id` ->
+  `404`.
+- Through a real browser click end-to-end (after the caching
+  detour above): 20 -> 35 flows visible in the reloaded report,
+  confirming the full path -- button, fetch, server-side resume,
+  disk write, reload, fresh render -- works as one real user-facing
+  action, not just as separately-tested layers.
+- Full regression: the `crawl()` refactor itself (extracting
+  `_run_dfs()`) produced byte-identical summary shape on a fresh
+  saucedemo run to what this project's numbers looked like before the
+  extraction -- confirms the split didn't change the algorithm, only
+  where its code lives.

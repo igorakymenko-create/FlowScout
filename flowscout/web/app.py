@@ -201,7 +201,17 @@ def get_report(run_id: str):
     path = runs_module.get_run_dir(run_id) / "report.html"
     if not path.exists():
         raise HTTPException(404, "report not ready yet")
-    return path.read_text(encoding="utf-8")
+    # no-store (Aug 2026): found live -- resume_flow's own
+    # window.location.reload() (see report.py's _resume_script_html)
+    # re-navigated to this exact URL after a real, confirmed-on-disk
+    # update (flows.json genuinely had the new flows), but the browser
+    # served a cached copy of the OLD report anyway, since this
+    # endpoint's response carried no cache directive at all and this
+    # content genuinely changes underneath the same URL over a run's
+    # lifetime (gap uploads, and now resume). Every consumer of this
+    # endpoint needs a fresh copy every time, not just this one caller.
+    return HTMLResponse(content=path.read_text(encoding="utf-8"),
+                         headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/runs/{run_id}/flows")
@@ -247,6 +257,29 @@ async def post_gap(run_id: str, tcms: UploadFile, threshold: float = Form(DEFAUL
     finally:
         Path(tmp_path).unlink(missing_ok=True)
     return gap.to_json()
+
+
+@app.post("/api/runs/{run_id}/resume")
+async def resume_flow(run_id: str, body: dict):
+    """Continue exploring from one specific BLOCKED (resumable) flow
+    with adjusted limits, instead of re-crawling the whole config --
+    see crawler.resume_flow()'s own docstring for exactly which BLOCKED
+    reasons this applies to. `body`: {"flow_id": int, "limits": {...}}
+    -- `limits` is a partial override (e.g. just {"max_depth": 12}),
+    merged over the run's own original limits; an "allow_mutating" key
+    inside it is accepted too, applied as a top-level override the same
+    way (not nested under limits in the config schema)."""
+    flow_id = body.get("flow_id")
+    if flow_id is None:
+        raise HTTPException(400, "flow_id is required")
+    limit_overrides = body.get("limits") or {}
+    try:
+        run = await asyncio.to_thread(runs_module.resume_flow_in_run, run_id, int(flow_id), limit_overrides)
+    except FileNotFoundError:
+        raise HTTPException(404, "run not found") from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return {"summary": run.summary()}
 
 
 @app.get("/api/projects/{project}/state")
