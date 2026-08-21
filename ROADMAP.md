@@ -2553,3 +2553,71 @@ endpoint, not just this one call site.
   saucedemo run to what this project's numbers looked like before the
   extraction -- confirms the split didn't change the algorithm, only
   where its code lives.
+
+## Change detection: link "new" flows to this run's own gap analysis (done, Aug 2026)
+
+Asked directly whether run-to-run comparison exists at all (M5 already
+did -- new/changed/missing, comprehensive, automatic on every crawl),
+plus two specific questions about it: does a "new" flow distinguish
+genuinely new functionality from something merely unblocked by a bug
+fix, and does the report connect a new flow to a matching TCMS item
+when one exists ("if it matches a test case, that's fine"). Checked
+the code rather than assumed: the first is answered the same way
+"missing" already is (deliberately not guessed at -- see below); the
+second was a real gap -- `ChangeEvent` for `kind="new"` never carried
+a `tcms_id` at all, only "changed"/"missing" did (inherited from a
+*prior run's* human-confirmed link). A brand-new flow that happened to
+match a TCMS item this same run had no way to say so.
+
+**Built the fix chosen first** (of two real gaps found; the second --
+naming a FlowScout-side regression as an explicit possible cause of
+"missing", not just an app-side one -- stays open, not addressed here):
+`detect_changes()` now takes an optional `gap: GapAnalysis | None`.
+When given, "new" events look up their own `flow_id` in
+`gap.flow_coverage`, and if gap analysis already scored that flow
+`covered` or `partial` against a real TCMS item, its `tcms_id` gets
+set -- same field "changed"/"missing" already use, but sourced
+differently, and the docstring says so plainly: a prior confirmation
+is a *certain* pairing a human made; a "new" flow's match is *this
+run's own fuzzy embedding guess*, not confirmed by anyone. Worded that
+way in the report too ("Gap-analysis match, not a confirmed link"), not
+folded into the same "_confirmed" language `changed_confirmed`/
+`missing_confirmed` already use for the real thing.
+
+**Required reordering, not just adding a parameter.** Both call sites
+(`web/runs.py`'s `_execute`, `cli.py`'s `cmd_crawl`) ran
+`detect_changes()` *before* gap analysis -- harmless before, since
+neither needed the other, but exactly backwards for this. Reordered so
+gap analysis runs first in both places; `detect_changes()` still runs
+before `project_state.record_run()` overwrites what it compares
+against, same as always, just later in the sequence than before.
+
+**New `ChangeReport.summary()["new_matched"]`** (mirroring
+`changed_confirmed`/`missing_confirmed`'s existing shape) and the
+CLI's own change-detection print line updated to show it alongside the
+other counts.
+
+**Verified live, two consecutive real crawls of the same project, not
+assumed from reading the code alone:** crawled saucedemo once with
+`allow_mutating: false` (add-to-cart never becomes a real flow, can't
+enter project state) to seed a baseline, then again with
+`allow_mutating: true` (add-to-cart becomes real for the first time)
+plus a TCMS item describing exactly that. Result:
+`{"new": 1, "new_matched": 1, "missing": 1, ...}` -- the newly-unblocked
+add-to-cart flow correctly linked to `TC-ADDCART` through this run's
+own gap analysis, not left looking as unexplained as a "new" flow with
+no TCMS attached at all would. Report re-rendered with a synthetic
+matched/unmatched pair of "new" events to confirm the note text
+renders correctly for both cases (present when matched, empty
+otherwise) without a template error.
+
+**Still open, not addressed in this pass:** naming a regression in
+FlowScout's own crawling logic (as opposed to the app under test) as
+an explicit possible cause of a "missing" event -- currently
+`ChangeEvent`'s own docstring lists "the feature was removed, a real
+regression [in the app], or just crawl variance" but not "the crawler
+itself changed behavior between runs," even though that's exactly as
+real a cause as the other three, and arguably the most pointed one to
+call out given how much of `crawler.py` this very session touched.
+Deferred at the user's own explicit choice of which gap to start
+with, not forgotten.

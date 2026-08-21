@@ -369,7 +369,16 @@ class ChangeEvent:
     ROADMAP.md). The operator decides; the report states the fact."""
     identity: str
     kind: str  # "new" | "changed" | "missing"
-    tcms_id: Optional[str] = None       # populated when this identity has a confirmed TCMS link
+    # For "changed"/"missing": populated when this identity has a
+    # confirmed TCMS link from a PRIOR run (project_state, a human's own
+    # `flowscout confirm`) -- a certain pairing. For "new" (Aug 2026):
+    # populated instead from THIS run's own gap analysis, if one was
+    # attached -- a fuzzy embedding match, not a confirmed one, but still
+    # the honest difference between "genuinely undocumented new
+    # behavior" and "a new capability that already has a matching test
+    # case waiting for it". None either way if nothing matched, or no
+    # TCMS/gap analysis was available to check against.
+    tcms_id: Optional[str] = None
     flow_id: Optional[int] = None       # this run's flow id -- absent for "missing"
     summary: str = ""                   # current (new/changed) or last-known (missing) step text
     previous_summary: str = ""          # only meaningful for "changed"
@@ -389,6 +398,12 @@ class ChangeReport:
             "missing": sum(1 for e in self.events if e.kind == "missing"),
             "changed_confirmed": sum(1 for e in self.events if e.kind == "changed" and e.tcms_id),
             "missing_confirmed": sum(1 for e in self.events if e.kind == "missing" and e.tcms_id),
+            # A "new" event's tcms_id (Aug 2026) comes from THIS run's own
+            # gap analysis, not a prior human confirmation the way
+            # changed/missing's tcms_id does -- a fuzzy match, not a
+            # certain one, so counted separately rather than folded into
+            # the same "_confirmed" naming.
+            "new_matched": sum(1 for e in self.events if e.kind == "new" and e.tcms_id),
         }
 
     def to_json(self) -> dict:

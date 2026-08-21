@@ -172,7 +172,17 @@ def _change_report_html(changes: ChangeReport | None) -> str:
 
     new_html = ""
     if new:
-        rows = "".join(_event_row(e) for e in new)
+        # A "new" flow's tcms_id (Aug 2026) comes from THIS run's own gap
+        # analysis, not a prior confirmation -- the honest, checkable
+        # difference between "genuinely undocumented behavior, worth a
+        # look" and "a new capability that already matches a test case".
+        # A fuzzy match, not a certain one, so worded that way rather than
+        # "confirmed" (see models.py's ChangeEvent.tcms_id docstring).
+        rows = "".join(_event_row(
+            e, "Matches an existing test case (tagged above) — likely a newly-covered capability, "
+               "not undocumented behavior. Gap-analysis match, not a confirmed link — worth a quick "
+               "look, not necessarily a concern." if e.tcms_id else ""
+        ) for e in new)
         new_html = f"""
   <details class="dup-details">
     <summary class="dup-summary">Show {len(new)} new flow{'s' if len(new) != 1 else ''} since last run</summary>

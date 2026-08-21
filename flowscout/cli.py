@@ -48,15 +48,20 @@ def cmd_crawl(args) -> None:
           f"({s['flows_unique']} unique / {s['flows_duplicate']} duplicate / {s['flows_blocked']} blocked), "
           f"{s['checkpoints']} checkpoints, {s['skipped_candidates']} actions withheld", file=sys.stderr)
 
-    # Must run before record_run() below overwrites what it would compare against.
-    changes = detect_changes(run)
+    gap = _run_gap_analysis(run, args.tcms, args.gap_threshold) if args.tcms else None
+
+    # Must run before record_run() below overwrites what it would compare
+    # against. Runs AFTER gap analysis (Aug 2026) so a brand-new flow that
+    # happens to match a TCMS item this same run gets linked in the change
+    # report too -- see detect_changes()'s own gap parameter.
+    changes = detect_changes(run, gap)
     if changes.baseline:
         print("[flowscout] change detection: baseline run, nothing to compare against yet", file=sys.stderr)
     else:
         cs = changes.summary()
-        print(f"[flowscout] change detection: {cs['new']} new, {cs['changed']} changed "
-              f"({cs['changed_confirmed']} confirmed), {cs['missing']} missing "
-              f"({cs['missing_confirmed']} confirmed)"
+        print(f"[flowscout] change detection: {cs['new']} new ({cs['new_matched']} already match a "
+              f"test case), {cs['changed']} changed ({cs['changed_confirmed']} confirmed), "
+              f"{cs['missing']} missing ({cs['missing_confirmed']} confirmed)"
               + (f" -- {changes.environment_mismatch}" if changes.environment_mismatch else ""), file=sys.stderr)
 
     out_dir = Path(args.out)
@@ -64,7 +69,6 @@ def cmd_crawl(args) -> None:
     print(f"[flowscout] project state: {len(state.flows)} known flow identities "
           f"({project_state.state_path(run.project)})", file=sys.stderr)
 
-    gap = _run_gap_analysis(run, args.tcms, args.gap_threshold) if args.tcms else None
     _write_outputs(run, out_dir, gap, changes)
 
 

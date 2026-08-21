@@ -81,9 +81,6 @@ def _execute(run_id: str, config: dict, tcms_path: Optional[str] = None,
         run = crawl(config)
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "flows.json").write_text(json.dumps(run.to_json(), indent=2), encoding="utf-8")
-        # Must run before record_run() below overwrites what it compares against.
-        changes = detect_changes(run)
-        (out_dir / "change_report.json").write_text(json.dumps(changes.to_json(), indent=2), encoding="utf-8")
 
         gap: Optional[GapAnalysis] = None
         if tcms_path:
@@ -100,6 +97,15 @@ def _execute(run_id: str, config: dict, tcms_path: Optional[str] = None,
                 (out_dir / "gap_analysis.json").write_text(json.dumps(gap.to_json(), indent=2), encoding="utf-8")
             except Exception as exc:
                 handle.gap_error = str(exc)[:500]
+
+        # Must run before record_run() below overwrites what it compares
+        # against. Runs AFTER gap analysis (Aug 2026) so a brand-new flow
+        # that happens to match a TCMS item this same run gets linked in
+        # the change report too, not left looking as unexplained as a
+        # "new" flow with no TCMS attached at all -- see
+        # detect_changes()'s own gap parameter.
+        changes = detect_changes(run, gap)
+        (out_dir / "change_report.json").write_text(json.dumps(changes.to_json(), indent=2), encoding="utf-8")
 
         (out_dir / "report.html").write_text(render_html(run, gap, changes, run_id=run_id), encoding="utf-8")
         project_state_module.record_run(run, run_id=run_id)
