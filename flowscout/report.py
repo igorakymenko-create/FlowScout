@@ -46,6 +46,15 @@ def _flow_steps_html(flow, states: dict) -> str:
             outcome_note += (
                 f' <span class="step-note step-error">→ page returned HTTP {t.response_status}</span>'
             )
+        # anchor_target_missing is known BEFORE the click (a fact about the
+        # DOM at discovery time -- see ElementCandidate's own docstring),
+        # unlike response_status above which only exists after. Same
+        # "state the fact" styling either way.
+        if t.anchor_target_missing:
+            outcome_note += (
+                ' <span class="step-note step-error">'
+                '→ this link\'s anchor target doesn\'t exist on the page</span>'
+            )
         parts.append(
             f'<li class="step"><span class="step-idx">{i + 1}</span>'
             f'<span class="step-page">{page}</span>'

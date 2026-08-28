@@ -49,6 +49,31 @@ _DISCOVER_JS = r"""
         return first.replace(/\s+/g, ' ').trim().slice(0, 60);
     }
 
+    // Real-world motivation: a live user question about a bank FAQ page
+    // where a topic link had no matching anchor and silently "led to
+    // itself" -- fingerprint.py always strips fragments, so a dangling
+    // in-page anchor and a working one look identical to the crawler.
+    // This checks an objective, present-tense fact (does an element with
+    // this id/name exist in the DOM right now), not the link's intent --
+    // consistent with the project's own rule of observing, never guessing
+    // at correctness. Deliberately skips a literal href="#" (no fragment
+    // at all): that's a ubiquitous, legitimate idiom for a JS-driven
+    // button, not a broken link, and flagging it would be pure noise.
+    function anchorTargetMissing(href) {
+        if (!href) return false;
+        let u;
+        try { u = new URL(href, location.href); } catch (e) { return false; }
+        const frag = u.hash ? u.hash.slice(1) : '';
+        if (!frag) return false;
+        // A fragment on a DIFFERENT document (different origin/path/query)
+        // targets that OTHER page's DOM, which isn't available to check
+        // from here -- only claim "missing" about this document's own DOM.
+        const samePage = u.origin === location.origin && u.pathname === location.pathname
+            && u.search === location.search;
+        if (!samePage) return false;
+        return !document.getElementById(frag) && document.getElementsByName(frag).length === 0;
+    }
+
     function isFixedPositioned(el) {
         // react-burger-menu-style off-canvas panels are position:fixed and
         // slide past the viewport edge while "closed". That's the pattern
@@ -122,6 +147,7 @@ _DISCOVER_JS = r"""
             dataTest: n.getAttribute('data-test') || n.getAttribute('data-testid') || '',
             id: n.id || '',
             href: n.getAttribute('href') || '',
+            anchorTargetMissing: anchorTargetMissing(n.getAttribute('href') || ''),
             // Icon-only elements (a logo link, an icon button) often carry
             // no text of their own -- the accessible name lives on a child
             // <img alt="..."> instead (e.g. a logo <a> wrapping <img
@@ -215,6 +241,7 @@ _DISCOVER_JS = r"""
             dataTest: el.getAttribute('data-test') || el.getAttribute('data-testid') || '',
             id: el.id || '',
             href: el.getAttribute('href') || '',
+            anchorTargetMissing: anchorTargetMissing(el.getAttribute('href') || ''),
             // See firstBlockText above -- matters most here: a wizard
             // card's own text commonly spans a heading + description,
             // which is exactly the shape that broke replay.
@@ -668,7 +695,7 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
     return ElementCandidate(
         signature=signature, norm_signature=norm_signature, label=label,
         selector=json.dumps(el), risk=risk, risk_reason=reason, discovered_via=via,
-        is_choice=is_choice,
+        is_choice=is_choice, anchor_target_missing=bool(el.get("anchorTargetMissing", False)),
     ), None
 
 

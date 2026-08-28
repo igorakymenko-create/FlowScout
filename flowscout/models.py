@@ -48,6 +48,23 @@ class ElementCandidate:
     # collapsing into one (see identity.py's mutating_signature_set,
     # which this feeds alongside risk == MUTATING).
     is_choice: bool = False
+    # True when this candidate's href is a fragment-only or same-document
+    # link (e.g. "#topic-name") whose target -- an element with a matching
+    # id or name attribute -- does NOT exist anywhere in the current DOM.
+    # A dangling in-page anchor is fingerprint-identical to a working one
+    # (fragments are always stripped by fingerprint.py's normalize_url,
+    # and clicking it causes no navigation either way), so without this
+    # flag the two are completely indistinguishable in the report. Checked
+    # once, at discovery time, in the same JS pass that reads href --
+    # cheap (a single getElementById/getElementsByName lookup) and purely
+    # structural, not a guess: it doesn't assert the link is "wrong", only
+    # that its target doesn't exist right now. Deliberately excludes a
+    # literal href="#" (empty fragment) -- that's an extremely common,
+    # legitimate idiom for a JS-driven button/toggle, not a broken link;
+    # flagging it would be near-total noise. Motivated directly by a real
+    # anecdote (a bank FAQ page whose topic link had no matching anchor
+    # and silently "led to itself").
+    anchor_target_missing: bool = False
 
 
 @dataclass
@@ -108,6 +125,11 @@ class Transition:
     # directly from a live question: a same-domain link landing on a 404
     # was previously indistinguishable from a normal page in every way.
     response_status: Optional[int] = None
+    # Copied from the ElementCandidate this transition was built from --
+    # see ElementCandidate.anchor_target_missing. Known before the click
+    # even happens (it's a fact about the DOM at discovery time, not about
+    # what the click did), unlike response_status which only exists after.
+    anchor_target_missing: bool = False
 
 
 @dataclass

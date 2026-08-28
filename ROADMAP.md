@@ -2700,8 +2700,75 @@ elsewhere in the suite) are unaffected -- `response_status` stays
 tests still pass unmodified.
 
 **Not addressed in this pass, by explicit user choice:** detecting a
-broken in-page anchor link (Bolton's original example) -- would
-require a real intent-guessing heuristic (e.g., does the target
-fragment id actually exist in the DOM?), which is a meaningfully
-different and riskier kind of feature than reading an HTTP status
-code off the wire. Deferred, not forgotten.
+broken in-page anchor link (Bolton's original example). Revisited and
+built in the very next session turn -- see "Dangling in-page anchor
+detection" below; it turned out an objective, non-guessing check was
+possible after all.
+
+
+## Dangling in-page anchor detection (done, Aug 2026)
+
+Direct follow-up question to the 404/5xx feature above: what about the
+*other* half of Bolton's original anecdote, the self-referencing FAQ
+link itself, not just 404s? Asked plainly: should FlowScout also tell
+the operator when an anchor is "empty" (leads nowhere)?
+
+Re-examined the earlier "would require guessing at intent" conclusion
+and found it overstated. There IS an objective, present-tense,
+non-guessing check available: does the DOM contain an element whose
+`id` (or legacy `name`) matches the link's fragment, right now? That's
+a structural fact about the page, exactly the same category of thing
+as an HTTP status code -- it doesn't assert the link is "wrong" or
+guess what the author meant, only that its stated target doesn't
+currently exist. What genuinely would have required guessing (and
+stayed out of scope) is a *different*, much noisier case: a literal
+`href="#"` with no fragment at all, which is an extremely common,
+completely legitimate idiom for a JS-driven button/toggle (jQuery/
+Bootstrap-era markup especially) -- flagging every one of those would
+be almost pure noise, not signal. Put both options to the user
+explicitly; **chose "dangling fragment only" (recommended), literal
+`href="#"` excluded.**
+
+**Built:**
+- `actions.py`'s `_DISCOVER_JS`: new `anchorTargetMissing(href)` JS
+  helper, using the browser's own `URL()` to resolve the href (handles
+  relative/absolute forms correctly rather than string-splitting by
+  hand) and compare it against `location` -- same origin/pathname/
+  search required, since a `#frag` on a *different* document targets
+  that page's DOM, not the one being checked. Empty fragment (`href="#"`
+  or no fragment at all) returns `false` immediately -- the explicit
+  scope boundary. Otherwise: `!document.getElementById(frag) &&
+  document.getElementsByName(frag).length === 0`. Wired into both
+  places an element's `href` is already read (the main a/button/
+  [role=button] pass and the div-as-button pool pass -- the latter is
+  effectively always `false` since divs don't carry `href`, but kept
+  for uniformity/future-proofing rather than special-cased away).
+- `models.py`: new `ElementCandidate.anchor_target_missing: bool =
+  False`, computed once at discovery time (unlike `response_status`,
+  this is knowable *before* the click even happens -- it's a fact
+  about the DOM as it stands, not about what clicking did). Copied
+  onto `Transition.anchor_target_missing` in `crawler.py` at the same
+  point `is_choice` already gets copied from the candidate that
+  produced it.
+- `report.py`: `_flow_steps_html()` appends a
+  `→ this link's anchor target doesn't exist on the page` warning note
+  whenever `t.anchor_target_missing` is set -- additive to whatever
+  other outcome note the same step already has (a dangling anchor
+  transition is *also* always a same-fingerprint "revisit", since
+  clicking it causes no real navigation either way, so both notes
+  render together in practice).
+
+**Verified live**, three links on one fixture page: a working anchor
+(`#topic-a`, a matching `id="topic-a"` element really exists), a
+dangling one built to match Bolton's exact scenario (`#topic-ghost`,
+no matching element anywhere, label deliberately phrased as "How do I
+reset my thing?" to mirror his FAQ wording), and a literal `href="#"`
+JS-hook link. Result: `anchor_target_missing` was `True` only for the
+dangling link, `False` for both the working anchor and the empty-hash
+link -- confirming the scope boundary holds, not just the positive
+case. All three transitions still recorded `outcome == "revisit"`
+(none caused real navigation, exactly as expected) with the crawl
+itself completely unaffected either way. Report HTML confirmed to
+render the note text correctly, alongside (not replacing) the
+existing "back to an already-explored state" note on the same step.
+All 20 existing tests still pass unmodified.

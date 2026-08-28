@@ -346,7 +346,8 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
         trial = Transition(from_fp=frame.fp, to_fp=None, action_label=describe_action(el_meta, None),
                             action_norm_signature=candidate.norm_signature, risk=candidate.risk,
                             risk_reason=candidate.risk_reason, replay_meta=candidate.selector,
-                            is_choice=candidate.is_choice)
+                            is_choice=candidate.is_choice,
+                            anchor_target_missing=candidate.anchor_target_missing)
         result = _run_path(browser, config, frame.path + [trial], run, credentials)
         frame.any_followed = True
 
