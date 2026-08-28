@@ -96,6 +96,18 @@ class Transition:
     # Copied from the ElementCandidate this transition was built from --
     # see ElementCandidate.is_choice.
     is_choice: bool = False
+    # The main-document HTTP response status for whatever navigation this
+    # click actually caused, if any (see actions.py's perform_action) --
+    # None for the common case of a click that didn't navigate at all
+    # (a menu toggle, an in-page JS action) or a <select> that didn't
+    # either. Never stops the crawl or changes what gets explored --
+    # FlowScout still walks whatever a 404/500 page itself offers, same
+    # as any other page -- this is purely a visibility signal: state the
+    # fact, let the operator decide (same principle as change_detection's
+    # "missing" and gap_analysis's "not_found"). Found worth adding
+    # directly from a live question: a same-domain link landing on a 404
+    # was previously indistinguishable from a normal page in every way.
+    response_status: Optional[int] = None
 
 
 @dataclass

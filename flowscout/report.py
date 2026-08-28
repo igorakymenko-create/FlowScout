@@ -37,6 +37,15 @@ def _flow_steps_html(flow, states: dict) -> str:
             outcome_note = f' <span class="step-note">→ back to an already-explored state{dest}</span>'
         elif t.outcome == "error":
             outcome_note = f' <span class="step-note step-error">→ error: {_esc(t.detail[:140])}</span>'
+        # response_status is a pure visibility signal (see actions.py's
+        # _capture_nav_status) -- it never changed what got crawled, so it's
+        # additive to whatever outcome_note already says, not a replacement.
+        # A same-domain link landing on a 404/5xx was previously completely
+        # invisible: same fingerprint shape as any other new page.
+        if t.response_status is not None and t.response_status >= 400:
+            outcome_note += (
+                f' <span class="step-note step-error">→ page returned HTTP {t.response_status}</span>'
+            )
         parts.append(
             f'<li class="step"><span class="step-idx">{i + 1}</span>'
             f'<span class="step-page">{page}</span>'

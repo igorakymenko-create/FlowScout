@@ -64,17 +64,19 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
     """Execute `path` from a fresh, isolated browser context (fresh
     cookies/localStorage -- no leakage between DFS branches). Returns
     (fp, url_pattern, title, candidates, last_fill_summary, unclassified,
-    disabled, last_choice_state) for the state reached after the last
-    step, or None if some step failed (an error checkpoint is recorded,
-    pointing at which step). `last_fill_summary` is whatever
-    perform_action returned for the *final* step of `path` -- None if
-    that step wasn't a form submission, else the field:value summary
-    used to build a readable "Fill form and submit ... (...)" label
-    (e.g. which login account was used). `last_choice_state` is the
-    radio/checkbox state observed alongside it (see
+    disabled, last_choice_state, last_response_status) for the state
+    reached after the last step, or None if some step failed (an error
+    checkpoint is recorded, pointing at which step). `last_fill_summary`
+    is whatever perform_action returned for the *final* step of `path`
+    -- None if that step wasn't a form submission, else the field:value
+    summary used to build a readable "Fill form and submit ... (...)"
+    label (e.g. which login account was used). `last_choice_state` is
+    the radio/checkbox state observed alongside it (see
     actions._read_choice_state) -- label-only, kept separate so it never
     ends up in Transition.form_fields (M4 codegen would try to `.fill()`
-    a checkbox otherwise).
+    a checkbox otherwise). `last_response_status` is the main-document
+    HTTP status of whatever navigation the final step actually caused
+    (see actions._capture_nav_status) -- None if it didn't cause one.
     `credentials` is passed in rather than read from `config` directly
     so each persona's own pass (see crawl()) can supply its own -- the
     only thing that actually differs between two personas walking the
@@ -83,16 +85,18 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
     page = context.new_page()
     last_fill_summary = None
     last_choice_state: dict = {}
+    last_response_status: int | None = None
     try:
         page.goto(config["start_url"], wait_until="load")
         page.wait_for_timeout(200)
         for i, t in enumerate(path):
             el_meta = json.loads(t.replay_meta)
             try:
-                fill_summary, choice_state = perform_action(page, el_meta, credentials)
+                fill_summary, choice_state, response_status = perform_action(page, el_meta, credentials)
                 if i == len(path) - 1:
                     last_fill_summary = fill_summary
                     last_choice_state = choice_state
+                    last_response_status = response_status
             except Exception as exc:
                 where = "final step" if i == len(path) - 1 else f"replay step {i + 1}/{len(path)}"
                 run.checkpoints.append(Checkpoint(
@@ -103,7 +107,8 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
                 return None
         fp, url_pattern, title, candidates, unclassified, disabled = _discover_state(
             page, config["allowed_domains"], run)
-        return fp, url_pattern, title, candidates, last_fill_summary, unclassified, disabled, last_choice_state
+        return (fp, url_pattern, title, candidates, last_fill_summary, unclassified, disabled,
+                last_choice_state, last_response_status)
     finally:
         context.close()
 
@@ -363,7 +368,8 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
                       extra_reason=f"Terminated: action '{trial.action_label}' raised an error")
             continue
 
-        new_fp, url_pat, title, new_candidates, fill_summary, new_unclassified, new_disabled, choice_state = result
+        (new_fp, url_pat, title, new_candidates, fill_summary, new_unclassified, new_disabled,
+         choice_state, response_status) = result
         # choice_state (radio/checkbox selections observed at submit time) is
         # merged into the label for human/gap-analysis visibility only -- it
         # must never reach trial.form_fields, since M4's codegen turns that
@@ -374,6 +380,7 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
             trial.form_fields = list(fill_summary.keys())
         trial.to_fp = new_fp
         trial.outcome = "revisit" if new_fp in run.states else "ok"
+        trial.response_status = response_status
         new_path = frame.path + [trial]
 
         if new_fp in run.states:
@@ -496,7 +503,7 @@ def crawl(config: dict) -> RunResult:
                     run.finished_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                     browser.close()
                     return run
-                root_fp, root_url_pat, root_title, root_candidates, _, root_unclassified, root_disabled, _ = root
+                root_fp, root_url_pat, root_title, root_candidates, _, root_unclassified, root_disabled, _, _ = root
                 run.states[root_fp] = StateNode(
                     fingerprint=root_fp, url_pattern=root_url_pat, raw_url=config["start_url"],
                     title=root_title, candidates=root_candidates,

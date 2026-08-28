@@ -924,33 +924,73 @@ def _read_choice_state(page, el_meta: dict) -> dict[str, str]:
         return {}
 
 
-def perform_action(page, el_meta: dict, credentials: dict) -> tuple[dict | None, dict]:
-    """Returns (fill_summary, choice_state). fill_summary is None if this
-    action wasn't a form submission -- see fill_enclosing_form.
-    choice_state (see _read_choice_state) is always a dict, empty if
-    there was nothing to observe; it's for the label only and never
-    feeds Transition.form_fields."""
+def _capture_nav_status(page):
+    """Registers a response listener that records the main document's
+    own HTTP status (not a sub-resource's -- an image/CSS/XHR loading
+    alongside the real navigation isn't what this is asking about),
+    last-one-wins if a redirect chain fires more than one (the final
+    destination's status is what matters, not an intermediate 30x).
+    Returns (holder_dict, remove_fn) -- read holder["status"] after
+    whatever action might have triggered a navigation, then always call
+    remove_fn() so the listener doesn't keep firing for later, unrelated
+    actions on the same page.
+
+    Purely a side channel: never raises, never affects control flow --
+    a click's own failure (element not actionable, timeout) still
+    propagates exactly as it did before this existed. Added directly
+    from a live question: a same-domain link landing on a 404 was
+    previously indistinguishable, in every way, from a normal page."""
+    holder = {"status": None}
+
+    def _on_response(resp):
+        try:
+            if resp.request.resource_type == "document" and resp.frame == page.main_frame:
+                holder["status"] = resp.status
+        except Exception:
+            pass  # a torn-down frame/request mid-navigation -- not worth this any attention
+
+    page.on("response", _on_response)
+    return holder, lambda: page.remove_listener("response", _on_response)
+
+
+def perform_action(page, el_meta: dict, credentials: dict) -> tuple[dict | None, dict, int | None]:
+    """Returns (fill_summary, choice_state, response_status).
+    fill_summary is None if this action wasn't a form submission -- see
+    fill_enclosing_form. choice_state (see _read_choice_state) is always
+    a dict, empty if there was nothing to observe; it's for the label
+    only and never feeds Transition.form_fields. response_status is the
+    main-document HTTP status of whatever navigation this action
+    actually caused, or None if it didn't cause one (see
+    _capture_nav_status)."""
     loc = build_locator(page, el_meta)
     if el_meta.get("tag") == "select":
         # build_locator resolves the <select> itself (via its own
         # dataTest/id) -- select_option targets the value recorded at
         # discovery time, not whatever happens to be selected on replay.
-        loc.select_option(value=el_meta["selectValue"], timeout=8000)
+        holder, remove = _capture_nav_status(page)
+        try:
+            loc.select_option(value=el_meta["selectValue"], timeout=8000)
+            try:
+                page.wait_for_load_state("load", timeout=8000)
+            except Exception:
+                pass
+            _settle(page)
+        finally:
+            remove()
+        return None, {}, holder["status"]
+    fill_summary = fill_enclosing_form(page, el_meta, credentials)
+    choice_state = _read_choice_state(page, el_meta)
+    holder, remove = _capture_nav_status(page)
+    try:
+        loc.click(timeout=8000)
         try:
             page.wait_for_load_state("load", timeout=8000)
         except Exception:
             pass
         _settle(page)
-        return None, {}
-    fill_summary = fill_enclosing_form(page, el_meta, credentials)
-    choice_state = _read_choice_state(page, el_meta)
-    loc.click(timeout=8000)
-    try:
-        page.wait_for_load_state("load", timeout=8000)
-    except Exception:
-        pass
-    _settle(page)
-    return fill_summary, choice_state
+    finally:
+        remove()
+    return fill_summary, choice_state, holder["status"]
 
 
 def current_domain(url: str) -> str:

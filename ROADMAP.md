@@ -2621,3 +2621,87 @@ real a cause as the other three, and arguably the most pointed one to
 call out given how much of `crawler.py` this very session touched.
 Deferred at the user's own explicit choice of which gap to start
 with, not forgotten.
+
+
+## HTTP 404/5xx detection for same-domain links (done, Aug 2026)
+
+Asked directly, with a real-world anecdote (Michael Bolton's Canadian
+bank FAQ page, where a topic link had no matching anchor and "led to
+itself"): what does the crawler do when a link points to itself, and
+separately, how does it react to an internal same-domain link that
+leads to a 404 page? Investigated both live before building anything.
+
+**Self-link finding: structurally invisible, and correctly so, not a
+bug.** `normalize_url()` in `fingerprint.py` always strips URL
+fragments (`urlunsplit(..., fragment="")`, hardcoded, no opt-out) --
+so a fragment-only navigation is fingerprint-identical to the page
+before it, whether the anchor it points to exists or not. A working
+in-page anchor link and Bolton's broken one produce the exact same
+observation: "clicked, state didn't change." FlowScout has no way to
+know the link's *intent*, only its *observed effect*, and inventing a
+guess at intent (e.g. flagging every anchor-only link as suspicious)
+would violate the project's own standing rule of never asserting
+about correctness, only reachability. Given the choice between
+building a heuristic for this and building nothing, explicitly chose
+nothing here -- see "not addressed" below.
+
+**404 finding: a real, worse gap.** A same-domain link landing on a
+genuine server-rendered 404 page was completely invisible: the HTTP
+status of a navigation was never captured anywhere in the crawl, so a
+404 page just looked like an ordinary new page/state, indistinguishable
+in the report from a working one. This one *is* an objective,
+observable fact (not a guess about intent), so worth fixing.
+
+**Chosen scope, via explicit user decision: 404/5xx detection only,
+not the broken-anchor-link heuristic** (offered as two independent
+options; the anchor heuristic stays explicitly deferred, not
+forgotten).
+
+**Built:**
+- `actions.py`: new `_capture_nav_status(page)` registers a Playwright
+  `page.on("response", ...)` listener that records the *main
+  document's* own status code (`resp.request.resource_type ==
+  "document" and resp.frame == page.main_frame` -- ignores XHR/asset
+  responses; last-one-wins across a redirect chain, matching the
+  final rendered page). `perform_action()` wraps its existing
+  click/select_option call in try/finally around this listener
+  (cleanup only -- the click itself is not newly wrapped in a
+  swallowing try/except, so a real click failure still propagates
+  exactly as before). Returns the captured status as a third tuple
+  element: `tuple[dict | None, dict, int | None]`.
+- `models.py`: new `Transition.response_status: Optional[int] = None`.
+  Documented explicitly as a pure visibility signal: never stops the
+  crawl or changes what gets explored, same principle as
+  `change_detection`'s "missing" and `gap_analysis`'s "not_found" --
+  state the fact, let the operator decide.
+- `crawler.py`: `_run_path()`'s return tuple grew from 8 to 9 elements
+  (`..., last_choice_state, last_response_status`); both call sites
+  (root discovery in `crawl()`, and the main DFS-loop unpack inside
+  `_run_dfs()`) updated to match, with `trial.response_status` now set
+  alongside `trial.to_fp`/`trial.outcome` at the same point in the
+  loop.
+- `report.py`: `_flow_steps_html()` now appends a
+  `→ page returned HTTP {status}` warning note (same `step-error`
+  styling as the existing error-outcome note) whenever
+  `t.response_status is not None and t.response_status >= 400`.
+  Additive, not a replacement -- a step could in principle carry both
+  a revisit/error outcome note and a bad status note.
+
+**Verified live**, not just read: a local fixture server (two links
+from a home page, one to a real `200`, one to a real `404`) crawled
+end to end. Confirmed `Transition.response_status == 200` for the
+working link and `== 404` for the broken one, with `outcome == "ok"`
+on both -- exactly the intended behavior of *observing*, not
+reclassifying or blocking the crawl. Rendered the report and confirmed
+the "→ page returned HTTP 404" note appears in the HTML for the 404
+step and nowhere else. Regression: ordinary crawls (saucedemo,
+elsewhere in the suite) are unaffected -- `response_status` stays
+`None`/`200` and nothing about crawl behavior changed; all 20 existing
+tests still pass unmodified.
+
+**Not addressed in this pass, by explicit user choice:** detecting a
+broken in-page anchor link (Bolton's original example) -- would
+require a real intent-guessing heuristic (e.g., does the target
+fragment id actually exist in the DOM?), which is a meaningfully
+different and riskier kind of feature than reading an HTTP status
+code off the wire. Deferred, not forgotten.
