@@ -630,7 +630,7 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
         return ElementCandidate(
             signature=signature, norm_signature=norm_signature, label=label,
             selector=json.dumps(el), risk=risk, risk_reason=reason, discovered_via=via,
-            is_choice=True,
+            is_choice=True, choice_group=base,
         ), None
 
     if el.get("tag") == "radio":
@@ -653,7 +653,7 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
         return ElementCandidate(
             signature=signature, norm_signature=norm_signature, label=label,
             selector=json.dumps(el), risk=risk, risk_reason=reason, discovered_via=via,
-            is_choice=True,
+            is_choice=True, choice_group=base,
         ), None
 
     if el.get("tag") == "checkbox":
@@ -674,7 +674,7 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
         return ElementCandidate(
             signature=signature, norm_signature=norm_signature, label=label,
             selector=json.dumps(el), risk=risk, risk_reason=reason, discovered_via=via,
-            is_choice=True,
+            is_choice=True, choice_group=base,
         ), None
 
     sig_key = el["dataTest"] or el["id"] or f"{el['tag']}:{el['text']}"

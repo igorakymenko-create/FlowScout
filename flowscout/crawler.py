@@ -618,3 +618,188 @@ def resume_flow(run: RunResult, flow: Flow, limit_overrides: dict, credentials: 
             apply_semantic_dedup(run, threshold=sem_cfg.get("threshold", DEFAULT_THRESHOLD))
         except Exception as exc:  # never let a dedup-pass bug take down an otherwise-successful resume
             run.semantic_dedup_status = f"error on resume: {exc}"
+
+
+def _path_to_state(run: RunResult, state_fp: str) -> list[Transition]:
+    """The sequence of already-walked transitions that reaches
+    `state_fp`, derived from StateNode.discovered_by_flow rather than
+    guessed or re-derived: the exact flow that first discovered this
+    state necessarily has a transition landing on it somewhere along
+    its OWN path (_run_dfs keeps extending the same path deeper before
+    ever calling emit_flow() for it -- discovery and flow-emission are
+    not the same moment), so truncating that flow's transitions at the
+    first one whose to_fp matches is exact, not approximate.
+
+    Empty list for the root state -- discovered_by_flow is None only
+    for the very first state (see crawl()'s own root-discovery special
+    case, which sets up StateNode directly and never goes through
+    _run_dfs's normal `discovered_by_flow=next_flow_id[0]` assignment)."""
+    node = run.states.get(state_fp)
+    if node is None:
+        raise ValueError(f"state {state_fp} not found in this run")
+    if node.discovered_by_flow is None:
+        return []
+    flow = next((f for f in run.flows if f.id == node.discovered_by_flow), None)
+    if flow is None:
+        raise ValueError(f"state {state_fp}'s discovering flow (#{node.discovered_by_flow}) not found")
+    for i, t in enumerate(flow.transitions):
+        if t.to_fp == state_fp:
+            return list(flow.transitions[:i + 1])
+    raise ValueError(f"state {state_fp}'s own discovering flow (#{flow.id}) doesn't actually reach it "
+                      f"-- this would be a data inconsistency, not a normal error")
+
+
+def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[int],
+                         limit_overrides: dict, credentials: dict, persona_name: str = "default") -> None:
+    """Apply several is_choice candidates from ONE already-known state
+    TOGETHER, in a single replay, then keep exploring normally from
+    whatever that combination reaches. The direct answer to a real,
+    verified limitation (see ROADMAP.md "Known limitation --
+    conjunctive multi-parameter gating is invisible to DFS"): the
+    crawler can only ever change one such candidate at a time on its
+    own, because picking one that doesn't itself alter the visible
+    candidate set reads as an ordinary "revisit" and _run_dfs's own
+    main loop stops the branch right there (see its comment at
+    `if new_fp in run.states:`). A page gated behind several
+    parameters set TOGETHER is structurally invisible to autonomous
+    exploration -- FlowScout doesn't guess the right combination (that
+    would mean inventing an expected result, which this project
+    deliberately never does), so this lets a human who already knows
+    the right combination hand it over directly instead.
+
+    Deliberately does NOT create a separate StateNode for "1 of N set",
+    "2 of N set", etc. -- those intermediate states are exactly the
+    ordinary revisits DFS already can't get past on its own (same
+    fingerprint as before, no new candidates yet), so recording them
+    would be noise, not signal. Only the FINAL combined state -- after
+    every selected candidate has been applied, in order -- is
+    discovered and recorded: the one piece of information a human
+    actually wanted when they built this combination.
+
+    `state_fp` must already be in run.states (from a prior crawl --
+    this is deliberately NOT usable "cold" against a site that hasn't
+    been crawled at all: `candidate_indices` resolve against that
+    state's own already-discovered `node.candidates`, never
+    user-authored CSS/locators FlowScout hasn't itself verified).
+    `candidate_indices`: positions into `run.states[state_fp].candidates`,
+    applied in the given order -- the caller's own choice of which
+    control to set first/last is respected, the same way a real person
+    filling in a form top-to-bottom would. Mutates `run` in place,
+    exactly like resume_flow()."""
+    node = run.states.get(state_fp)
+    if node is None:
+        raise ValueError(f"state {state_fp} not found in this run")
+    if not candidate_indices:
+        raise ValueError("at least one candidate must be selected")
+
+    path_to_state = _path_to_state(run, state_fp)
+
+    from playwright.sync_api import sync_playwright
+
+    limits = {**run.config.get("limits", {}), **{k: v for k, v in limit_overrides.items() if k != "allow_mutating"}}
+    max_depth = limits["max_depth"]
+    max_breadth = limits["max_breadth_per_state"]
+    max_states = limits["max_states"]
+    max_flows = limits["max_flows"]
+    max_action_repeat = limits.get("max_action_repeat", 2)
+    allow_mutating = limit_overrides.get("allow_mutating", run.config.get("allow_mutating", True))
+
+    # Local only -- run.config stays an honest record of how the
+    # original crawl was actually configured, same reasoning as
+    # resume_flow()'s own identical line.
+    config = {**run.config, "limits": limits, "allow_mutating": allow_mutating}
+
+    combo_path = list(path_to_state)
+    for idx in candidate_indices:
+        if idx < 0 or idx >= len(node.candidates):
+            raise ValueError(f"candidate index {idx} out of range for state {state_fp}")
+        candidate = node.candidates[idx]
+        # Same safety invariant normal DFS enforces before ever clicking
+        # anything (see this module's own top-of-file docstring) -- a
+        # human picking a combination through the UI doesn't get to
+        # silently bypass it.
+        if candidate.risk == Risk.DESTRUCTIVE:
+            raise ValueError(f"candidate '{candidate.label}' is destructive -- never walked, "
+                              f"in a combination or otherwise")
+        if candidate.risk == Risk.MUTATING and not allow_mutating:
+            raise ValueError(f"candidate '{candidate.label}' is mutating and allow_mutating is false")
+        el_meta = json.loads(candidate.selector)
+        trial = Transition(from_fp=state_fp, to_fp=None, action_label=describe_action(el_meta, None),
+                            action_norm_signature=candidate.norm_signature, risk=candidate.risk,
+                            risk_reason=candidate.risk_reason, replay_meta=candidate.selector,
+                            is_choice=candidate.is_choice,
+                            anchor_target_missing=candidate.anchor_target_missing)
+        combo_path.append(trial)
+
+    next_flow_id = [max((f.id for f in run.flows), default=0) + 1]
+    # Fresh, not pre-populated from run.flows -- same convention
+    # resume_flow() already uses for its own seq_to_flow_id/
+    # revisit_history: a combination's own new branches are deduped
+    # against each other, not against the entire pre-existing run.
+    seq_to_flow_id: dict[tuple, int] = {}
+    revisit_history: set[str] = set()
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        try:
+            result = _run_path(browser, config, combo_path, run, credentials)
+            if result is None:
+                raise RuntimeError("the combination failed to apply -- see this run's checkpoints "
+                                    "for which step and why")
+            (new_fp, url_pat, title, new_candidates, fill_summary, new_unclassified, new_disabled,
+             choice_state, response_status) = result
+
+            last = combo_path[-1]
+            label_fields = {**(fill_summary or {}), **(choice_state or {})}
+            last.action_label = describe_action(json.loads(last.replay_meta), label_fields or None)
+            if fill_summary:
+                last.form_fields = list(fill_summary.keys())
+            last.to_fp = new_fp
+            last.response_status = response_status
+
+            if new_fp in run.states:
+                last.outcome = "revisit"
+                flow = Flow(
+                    id=next_flow_id[0], status=FlowStatus.UNIQUE, duplicate_of=None,
+                    dedup_reason="User-specified parameter combination -- reached an already-known state",
+                    transitions=combo_path, end_state_fp=new_fp, persona=persona_name,
+                )
+                run.flows.append(flow)
+            else:
+                last.outcome = "ok"
+                new_node = StateNode(
+                    fingerprint=new_fp, url_pattern=url_pat, raw_url="", title=title,
+                    candidates=new_candidates, discovered_by_flow=next_flow_id[0],
+                    unclassified_interactive=new_unclassified, disabled_interactive=new_disabled,
+                )
+                run.states[new_fp] = new_node
+                flow = Flow(
+                    id=next_flow_id[0], status=FlowStatus.UNIQUE, duplicate_of=None,
+                    dedup_reason="User-specified parameter combination -- newly discovered state",
+                    transitions=combo_path, end_state_fp=new_fp, persona=persona_name,
+                )
+                run.flows.append(flow)
+                next_flow_id[0] += 1
+
+                # The combination's own state/flow are a free seed, not
+                # counted against the budget _run_dfs spends exploring
+                # WHATEVER ELSE this unlocked -- same "own full budget"
+                # reasoning as resume_flow()'s states_before/flows_before.
+                frame = _Frame(fp=new_fp, path=combo_path)
+                frame.order = _order_for(new_node, max_breadth, run, revisit_history)
+                stack: list[_Frame] = [frame]
+                states_before = len(run.states) - 1
+                flows_before = len(run.flows) - 1
+
+                _run_dfs(browser, config, run, credentials, persona_name, stack, next_flow_id,
+                         max_depth, max_breadth, max_states, max_flows, max_action_repeat, allow_mutating,
+                         states_before, flows_before, False, seq_to_flow_id, revisit_history)
+        finally:
+            browser.close()
+
+    sem_cfg = run.config.get("semantic_dedup", {})
+    if sem_cfg.get("enabled", True):
+        try:
+            apply_semantic_dedup(run, threshold=sem_cfg.get("threshold", DEFAULT_THRESHOLD))
+        except Exception as exc:  # never let a dedup-pass bug take down an otherwise-successful combination
+            run.semantic_dedup_status = f"error on combination: {exc}"

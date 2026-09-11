@@ -2960,3 +2960,144 @@ evidence.
 pass; no Playwright browser processes left running after any of the
 live verification crawls (checked via `Get-CimInstance Win32_Process`
 for headless/playwright chrome processes -- zero).
+
+
+## Discovery->click occlusion desync, investigated further (Aug 2026)
+
+Follow-up to the `/settings` finding above: reproduced the exact
+mechanism with a purpose-built local fixture rather than only reading
+the code. `_DISCOVER_JS`'s occlusion check
+([actions.py:121-129](flowscout/actions.py#L121-L129)) is a ONE-SHOT
+`elementFromPoint` snapshot taken once, at discovery time; `_run_path()`
+never re-runs it before an individual replay step's own click -- it
+just loads the saved `el_meta` and calls `perform_action()` directly.
+
+**Fixture**: a link, unoccluded at page-load; a fixed-position overlay
+that appears 900ms later (mimicking a first-visit onboarding
+modal/toast -- exactly the kind of thing that would appear fresh on
+EVERY replay, since FlowScout's own fresh-context-per-path design
+guarantees "first visit" every single time). Result, reproduced
+on-demand and exactly matching alternateqa.com's own diagnosis:
+
+```
+- element is visible, enabled and stable
+- <div id="overlay">…</div> intercepts pointer events
+```
+
+Discovery correctly said "not occluded" at T0; by T0+1100ms (a
+realistic stand-in for replay overhead or other candidates tried
+first from the same state) something else had appeared and now blocks
+the click. Root cause confirmed, not just theorized.
+
+**Proposed fix, not yet built** (this pass was investigation only, at
+the user's own explicit request): re-check occlusion right before the
+click/select_option call, with a short bounded grace period (well
+under the full `action_timeout_ms`) for a transient overlay to clear;
+if it's still occluded after that, withhold the action with a clear,
+specific reason ("became covered by an unexpected overlay between
+discovery and this replay") instead of burning the full timeout on a
+doomed click. Zero behavior change for the unoccluded/success path.
+Left unbuilt deliberately -- doing it right needs its own
+live-verified pass to make sure the bounded-retry design doesn't trade
+this false negative for new false positives elsewhere (e.g. a
+legitimately slow-to-render page that just needs the full timeout
+regardless).
+
+
+## User-guided combinations for conjunctive multi-parameter gating (done, Aug 2026)
+
+Direct answer to the limitation documented above ("Known limitation --
+conjunctive multi-parameter gating is invisible to DFS"): since
+FlowScout can't guess the right combination (that would mean inventing
+an expected result, which this project's own core principle never
+does), let a human who already knows it hand it over directly.
+Designed and built the same session the limitation was found, chosen
+explicitly over parking it: web UI (not raw JSON config), reusing the
+already-discovered candidates from a prior crawl rather than asking
+anyone to author CSS selectors.
+
+**Design, reusing `resume_flow()`'s own proven shape rather than
+inventing new machinery:**
+- `models.py`: new `ElementCandidate.choice_group` -- the identity of
+  the underlying `<select>`/radio-group/checkbox a candidate is an
+  option of (the same "base" `normalize_signature` already folded into
+  `norm_signature`, just surfaced as its own field). Populated in
+  `actions.py`'s `_build_candidate()` for all three native choice
+  shapes. **Known scope limit**: NOT populated for handler-discovered
+  div-as-button choice groups (Site B's wizard-card style) --
+  `_detect_choice_groups()` would need to return a group id per index,
+  not just a plain set, to support that; left for later since the
+  concrete case that motivated this (checkbox/radio/select) is fully
+  covered without it.
+- `crawler.py`'s new `_path_to_state(run, state_fp)`: the real,
+  already-walked transitions reaching an arbitrary state, derived
+  exactly (not guessed) from `StateNode.discovered_by_flow` --
+  truncating that flow's own transitions at the first one whose
+  `to_fp` matches. Works because DFS always extends the SAME path
+  deeper before ever emitting a flow for it, so the discovering flow's
+  transitions are guaranteed to contain the target state as a prefix.
+- `crawler.py`'s new `explore_combination(run, state_fp,
+  candidate_indices, limit_overrides, credentials)`: builds ONE
+  synthetic path (the real reach-path, plus one `Transition` per
+  selected candidate, in the caller's chosen order), replays it in a
+  SINGLE `_run_path()` call (deliberately not one call per candidate --
+  no intermediate StateNode gets created for "1 of N set", since those
+  are exactly the ordinary revisits DFS can't get past anyway and
+  would be noise, not signal), then seeds `_run_dfs()` from whatever
+  state that reaches to continue exploring normally, mirroring
+  `resume_flow()`'s own "own full budget from here" pattern. Same
+  safety invariant as normal DFS: a `Risk.DESTRUCTIVE` candidate is
+  refused outright, a `Risk.MUTATING` one only with `allow_mutating`
+  -- a human doesn't get to silently bypass this through the UI either.
+- `web/runs.py`'s new `explore_combination_in_run()` (loads from disk,
+  mutates, writes flows.json/report.html back, marks any existing gap
+  analysis stale) and `web/app.py`'s new `POST
+  /api/runs/{run_id}/explore-combination` -- same shape as the
+  existing resume endpoint, one call, `{state_fp, candidate_indices,
+  limits}`.
+- `report.py`: new "Test a parameter combination" section -- one card
+  per state with 2+ distinct `choice_group`s (a state with fewer has
+  nothing to combine: options within ONE group are mutually exclusive
+  by definition). Radio buttons for a group with 2+ members, a
+  checkbox for a group of exactly one (a lone checkbox, not an
+  alternative among several). Same elapsed-time-ticker JS pattern as
+  the resume box, in the same `<script>` tag (renamed conceptually,
+  not literally, to hold both).
+
+**Verified live, on the exact fixture that originally proved the
+limitation** (2 checkboxes + 1 select gating a hidden link, from the
+ROADMAP entry above): a normal crawl still finds only the 1 root
+state, as documented. Then, directly against the real
+`run.states`/`ElementCandidate`s that crawl produced (not
+hand-authored test data): picked the 3 real candidate indices
+(`choice_group` values confirmed correctly populated: `'sel-c'`,
+`'cb-a'`, `'cb-b'`), called `explore_combination()` --
+
+```
+After normal crawl: states=1 flows=4
+After explore_combination: states=3 flows=15
+Secret feature discovered: True
+flow 5 [UNIQUE]: ['Select "Yes" in "sel-c"', 'Toggle "Enable A"',
+                  'Toggle "Enable B"'] -- User-specified parameter
+                  combination -- newly discovered state
+```
+
+-- states went 1 -> 3 and the previously-unreachable secret link was
+found, with `_run_dfs` correctly continuing to explore past the
+unlocked state on its own. Verified the full web-layer path too, not
+just the crawler primitive: wrote a real `flows.json` to a scratch run
+directory, called `explore_combination_in_run()` exactly as the API
+endpoint would, confirmed the on-disk `report.html` got regenerated
+with the new flow visible, and cleaned up the scratch directory
+afterward. Separately confirmed the rendered report actually contains
+the combo-box UI with the correct three `choice_group`s and a "Test
+this combination" button. All 20 existing tests still pass; no
+leftover Playwright processes after verification.
+
+**Not yet covered, explicitly out of scope for this pass**: multi-page
+combinations (set a value on page 1, navigate, set another on page 2)
+-- the ROADMAP scenario that motivated this was colocated controls on
+one state, and that's what got built; a genuinely cross-page version
+would need its own design (which page to navigate to between steps,
+how to resolve THAT page's own candidates) rather than reusing this
+one directly.

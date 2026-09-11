@@ -282,6 +282,37 @@ async def resume_flow(run_id: str, body: dict):
     return {"summary": run.summary()}
 
 
+@app.post("/api/runs/{run_id}/explore-combination")
+async def explore_combination_endpoint(run_id: str, body: dict):
+    """Apply several is_choice candidates from one already-known state
+    TOGETHER, then keep exploring normally from wherever that lands --
+    see crawler.explore_combination()'s own docstring for why this
+    exists (a page gated behind several parameters set at once is
+    invisible to the crawler's own one-action-at-a-time DFS; a human
+    who knows the right combination hands it over directly instead of
+    FlowScout guessing at it). `body`: {"state_fp": str,
+    "candidate_indices": [int, ...], "limits": {...}} -- `limits`
+    same partial-override shape as /resume above."""
+    state_fp = body.get("state_fp")
+    if not state_fp:
+        raise HTTPException(400, "state_fp is required")
+    candidate_indices = body.get("candidate_indices") or []
+    if not candidate_indices:
+        raise HTTPException(400, "candidate_indices must be a non-empty list")
+    limit_overrides = body.get("limits") or {}
+    try:
+        run = await asyncio.to_thread(
+            runs_module.explore_combination_in_run, run_id, state_fp,
+            [int(i) for i in candidate_indices], limit_overrides)
+    except FileNotFoundError:
+        raise HTTPException(404, "run not found") from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return {"summary": run.summary()}
+
+
 @app.get("/api/projects/{project}/state")
 def get_project_state(project: str):
     """The durable cross-run record (identity.py + project_state.py) --

@@ -21,7 +21,7 @@ from typing import Optional
 
 from .. import project_state as project_state_module
 from ..change_detection import detect_changes
-from ..crawler import crawl, resume_flow
+from ..crawler import crawl, explore_combination, resume_flow
 from ..gap_analysis import DEFAULT_THRESHOLD, analyze_gaps
 from ..models import ChangeEvent, ChangeReport, GapAnalysis, RunResult
 from ..report import render_html
@@ -329,6 +329,52 @@ def resume_flow_in_run(run_id: str, flow_id: int, limit_overrides: dict) -> RunR
         gap = GapAnalysis.from_json(json.loads(gap_path.read_text(encoding="utf-8")))
         gap.status += (" (stale: this run was extended by resuming a flow since this gap "
                         "analysis ran -- re-upload the TCMS to refresh it)")
+
+    changes = _load_change_report(out_dir)
+    (out_dir / "report.html").write_text(render_html(run, gap, changes, run_id=run_id), encoding="utf-8")
+    return run
+
+
+def explore_combination_in_run(run_id: str, state_fp: str, candidate_indices: list[int],
+                                limit_overrides: dict) -> RunResult:
+    """Same shape as resume_flow_in_run() (loads from disk, mutates,
+    writes back in place) but seeds from a user-chosen SET of is_choice
+    candidates on one already-known state instead of an existing
+    blocked flow's own path -- see crawler.explore_combination()'s own
+    docstring for why this exists and what it deliberately doesn't do.
+
+    Persona: a combination is anchored to a STATE, not a flow, and a
+    state can in principle have been reached by more than one persona
+    if personas converge -- but StateNode itself doesn't record which
+    persona(s) reached it, only discovered_by_flow. Uses that flow's
+    own persona (the one that originally discovered this exact state),
+    same credentials-resolution reasoning as resume_flow_in_run above."""
+    out_dir = get_run_dir(run_id)
+    flows_path = out_dir / "flows.json"
+    if not flows_path.exists():
+        raise FileNotFoundError(f"no completed run at {run_id}")
+    run = RunResult.from_json(json.loads(flows_path.read_text(encoding="utf-8")))
+
+    node = run.states.get(state_fp)
+    if node is None:
+        raise ValueError(f"no state {state_fp} in run {run_id}")
+    persona_name = "default"
+    if node.discovered_by_flow is not None:
+        owner = next((f for f in run.flows if f.id == node.discovered_by_flow), None)
+        if owner is not None:
+            persona_name = owner.persona
+
+    credentials = _credentials_for_persona(run.config, persona_name)
+    explore_combination(run, state_fp, candidate_indices, limit_overrides, credentials, persona_name)
+
+    flows_path.write_text(json.dumps(run.to_json(), indent=2), encoding="utf-8")
+
+    gap: Optional[GapAnalysis] = None
+    gap_path = out_dir / "gap_analysis.json"
+    if gap_path.exists():
+        gap = GapAnalysis.from_json(json.loads(gap_path.read_text(encoding="utf-8")))
+        gap.status += (" (stale: this run was extended by testing a parameter combination since "
+                        "this gap analysis ran -- re-upload the TCMS to refresh it)")
 
     changes = _load_change_report(out_dir)
     (out_dir / "report.html").write_text(render_html(run, gap, changes, run_id=run_id), encoding="utf-8")

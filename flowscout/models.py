@@ -65,6 +65,21 @@ class ElementCandidate:
     # anecdote (a bank FAQ page whose topic link had no matching anchor
     # and silently "led to itself").
     anchor_target_missing: bool = False
+    # Non-empty only when is_choice is True: identifies WHICH underlying
+    # control this is an option of (a <select>'s own dataTest/id, a
+    # radio group's name, a checkbox's own dataTest/id) -- the same
+    # "base" identity normalize_signature already folds into
+    # norm_signature, just surfaced as its own field instead of staying
+    # locked inside a JSON blob only Python code parses. Added
+    # specifically so the report/web UI can GROUP candidates by which
+    # real-world control they belong to (radio/select options that
+    # share a choice_group are mutually exclusive alternatives; a
+    # checkbox's choice_group has exactly one member, itself) --
+    # needed to let an operator hand FlowScout a specific combination
+    # of values to try together (see explore_combination() in
+    # crawler.py) without the UI having to re-parse `selector` JSON
+    # just to answer "which of these options go together".
+    choice_group: str = ""
 
 
 @dataclass

@@ -396,6 +396,68 @@ def _states_html(run: RunResult) -> str:
     return "\n".join(rows)
 
 
+def _combination_box_html(fp: str, node, run_id: str, default_allow_mutating: bool) -> str:
+    """Groups this state's is_choice candidates by ElementCandidate.
+    choice_group (a <select>/radio group's own identity, or a
+    checkbox's own -- see that field's docstring) so an operator can
+    pick ONE value per group (radio-style for a group with 2+ members
+    -- mutually exclusive alternatives) or toggle it (checkbox-style
+    for a group of exactly 1) and submit the combination together.
+    Only rendered when a state has 2+ distinct groups -- combining
+    options WITHIN one group makes no sense (only one can ever be
+    picked at a time), so anything with fewer than two groups has
+    nothing to combine."""
+    groups: dict[str, list[tuple[int, "ElementCandidate"]]] = {}
+    for i, c in enumerate(node.candidates):
+        if c.is_choice and c.choice_group:
+            groups.setdefault(c.choice_group, []).append((i, c))
+    if len(groups) < 2:
+        return ""
+    parts = []
+    for group_name, members in groups.items():
+        if len(members) >= 2:
+            options = "".join(
+                f'<label><input type="radio" name="combo-{_esc(fp)}-{_esc(group_name)}" '
+                f'class="combo-choice" value="{i}"> {_esc(c.label)}</label>'
+                for i, c in members
+            )
+        else:
+            i, c = members[0]
+            options = f'<label><input type="checkbox" class="combo-choice" value="{i}"> {_esc(c.label)}</label>'
+        parts.append(f'<div class="combo-group"><span class="combo-group-name">{_esc(group_name)}</span>{options}</div>')
+    mutating_checked = "checked" if default_allow_mutating else ""
+    return f"""
+      <div class="combo-box" data-state-fp="{_esc(fp)}">
+        {"".join(parts)}
+        <div class="combo-controls">
+          <label>Max depth <input type="number" class="combo-depth" value="8" min="1" style="width:64px"></label>
+          <label><input type="checkbox" class="combo-mutating" {mutating_checked}> Allow mutating</label>
+          <button type="button" onclick="flowscoutExploreCombination('{_esc(run_id)}', this)">Test this combination</button>
+          <span class="combo-status"></span>
+        </div>
+      </div>"""
+
+
+def _combination_section_html(run: RunResult, run_id: str | None) -> str:
+    # Same run_id gate as the resume box -- a standalone CLI report
+    # (flowscout crawl --out ..., no server behind it) has nothing to
+    # POST this to, so the UI is omitted rather than rendered dead.
+    if not run_id:
+        return '<p class="empty">Only available from the web UI (needs a server to apply the combination against).</p>'
+    default_allow_mutating = bool(run.config.get("allow_mutating", True))
+    cards = []
+    for fp, node in run.states.items():
+        box = _combination_box_html(fp, node, run_id, default_allow_mutating)
+        if not box:
+            continue
+        page = _esc(human_page_label(node.url_pattern))
+        cards.append(f'<article class="flow-card"><h3 class="combo-card-title">{page}</h3>{box}</article>')
+    if not cards:
+        return ('<p class="empty">No state has two or more independent choice controls '
+                '(checkbox/radio/select) to combine.</p>')
+    return "\n".join(cards)
+
+
 def _handler_discovered_html(run: RunResult) -> str:
     """Candidates that weren't a/button/[role=button]-style markup at
     all -- div-as-button elements promoted after CDP's
@@ -519,7 +581,11 @@ def _resume_script_html() -> str:
     # The report's only interactive JS (Aug 2026) -- everything else in
     # this file is genuinely static HTML. Only emitted when render_html
     # was given a run_id (see its own docstring), so a standalone CLI
-    # report never carries dead code with nothing to call.
+    # report never carries dead code with nothing to call. Holds both
+    # flowscoutResume (per-flow) and flowscoutExploreCombination
+    # (per-state, multiple candidates at once) -- kept in one script
+    # tag rather than two, since both are gated by the exact same
+    # run_id condition and there's no reason to split them.
     return """
 <script>
 async function flowscoutResume(runId, flowId, btn) {
@@ -564,6 +630,51 @@ async function flowscoutResume(runId, flowId, btn) {
     clearInterval(timer);
   }
 }
+
+async function flowscoutExploreCombination(runId, btn) {
+  const box = btn.closest('.combo-box');
+  const stateFp = box.dataset.stateFp;
+  const depth = Number(box.querySelector('.combo-depth').value);
+  const allowMutating = box.querySelector('.combo-mutating').checked;
+  const statusEl = box.querySelector('.combo-status');
+  const indices = [...box.querySelectorAll('.combo-choice:checked')].map(el => Number(el.value));
+  if (indices.length === 0) {
+    statusEl.textContent = 'Pick at least one value first';
+    return;
+  }
+  btn.disabled = true;
+  // Same elapsed-time ticker as flowscoutResume above, same reason:
+  // this replays a real path plus every selected choice, then keeps
+  // exploring from there -- easily minutes on a real site, and a
+  // static "Testing…" is indistinguishable from stuck.
+  const startedAt = Date.now();
+  const tick = () => {
+    const secs = Math.round((Date.now() - startedAt) / 1000);
+    statusEl.textContent = `Testing… (${secs}s elapsed — this can take several minutes on slower sites)`;
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
+  try {
+    const res = await fetch(`/api/runs/${runId}/explore-combination`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({state_fp: stateFp, candidate_indices: indices,
+                             limits: {max_depth: depth, allow_mutating: allowMutating}}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      statusEl.textContent = 'Failed: ' + (data.detail || res.statusText);
+      btn.disabled = false;
+      return;
+    }
+    statusEl.textContent = 'Done — reloading…';
+    window.location.reload();
+  } catch (e) {
+    statusEl.textContent = 'Failed: ' + e;
+    btn.disabled = false;
+  } finally {
+    clearInterval(timer);
+  }
+}
 </script>"""
 
 
@@ -580,6 +691,7 @@ def render_html(run: RunResult, gap: GapAnalysis | None = None, changes: ChangeR
     gap_html = _gap_section_html(gap, run)
     change_html = _change_report_html(changes)
     states_html = _states_html(run)
+    combination_html = _combination_section_html(run, run_id)
     handler_discovered_html = _handler_discovered_html(run)
     disabled_html = _disabled_html(run)
     coverage_gaps_html = _coverage_gaps_html(run)
@@ -688,6 +800,19 @@ h3 {{ font-size: 14.5px; font-weight: 600; margin: 1.5rem 0 .5rem; }}
 .resume-box button:disabled {{ opacity: .6; cursor: default; }}
 .resume-status {{ color: var(--text-tertiary); }}
 
+.combo-card-title {{ font-size: 14px; font-weight: 600; margin: 0 0 8px; }}
+.combo-box {{ display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; }}
+.combo-group {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 8px; background: var(--surface-alt); border-radius: 6px; }}
+.combo-group-name {{ color: var(--text-tertiary); font-family: var(--font-mono); min-width: 90px; }}
+.combo-group label {{ display: flex; align-items: center; gap: 4px; color: var(--text-secondary); }}
+.combo-controls {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }}
+.combo-controls label {{ display: flex; align-items: center; gap: 4px; color: var(--text-secondary); }}
+.combo-controls input[type="number"] {{ font: inherit; padding: 2px 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text-primary); }}
+.combo-controls button {{ font: inherit; padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text-primary); cursor: pointer; }}
+.combo-controls button:hover {{ border-color: var(--accent); }}
+.combo-controls button:disabled {{ opacity: .6; cursor: default; }}
+.combo-status {{ color: var(--text-tertiary); }}
+
 .dup-details {{ margin-top: 12px; }}
 .dup-summary {{
   cursor: pointer; list-style: none; user-select: none;
@@ -784,6 +909,10 @@ a {{ color: var(--accent); }}
       <tbody>{states_html}</tbody>
     </table>
   </div>
+
+  <h2>Test a parameter combination</h2>
+  <p class="subhead">The crawler only ever changes one checkbox/radio/select at a time on its own — a section gated behind SEVERAL of these set together is invisible to it (see ROADMAP.md's own documented limitation). Pick a value per control below and submit them together; if that combination reveals something new, exploration continues automatically from there.</p>
+  {combination_html}
 
   <h2>Handler-discovered controls</h2>
   <p class="subhead">Div-as-button elements (no semantic markup our discovery selector matches) that CDP confirmed have a real click listener attached, and were clicked like any other candidate. Framework-agnostic — this works the same whether the click handler is a raw addEventListener or a React onClick prop.</p>
