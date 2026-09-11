@@ -164,7 +164,7 @@ async def create_run(request: Request):
     config.setdefault("project", "run")
     config.setdefault("credentials", {})
     config.setdefault("limits", {"max_depth": 4, "max_breadth_per_state": 8, "max_states": 30, "max_flows": 50,
-                                  "max_action_repeat": 2})
+                                  "max_action_repeat": 2, "action_timeout_ms": 8000})
     config.setdefault("allow_mutating", False)
     config.setdefault("allowed_domains", [])
     config.setdefault("embeddings_provider", embeddings.DEFAULT_PROVIDER)

@@ -690,6 +690,23 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
             "label": describe_action(el, None),
             "reason": f"obstructed by another element ({el.get('occludedBy') or 'unknown'}) at click point",
         }
+    if not (el.get("dataTest") or el.get("id") or el.get("href") or el.get("text")):
+        # build_locator()'s only remaining option for THIS element would be
+        # page.get_by_text(el["text"], exact=True) with an EMPTY string --
+        # found on a real crawl (alternateqa.com, an icon-only button with
+        # no aria-label/data-test/id) to resolve to a completely unrelated,
+        # hidden <div>, then hang for the entire click timeout waiting for
+        # it to become visible. An element with no data-test, no id, no
+        # href and no visible text has no reliable way to be relocated on
+        # replay at all -- reported the same way an occluded candidate
+        # already is (visible in the report's Safety register, never
+        # explored) rather than risking a locator that's guaranteed to
+        # resolve to the wrong element.
+        return None, {
+            "label": describe_action(el, None),
+            "reason": "no reliable locator for this element (no data-test/id/href/visible text) "
+                      "-- skipped rather than risk clicking the wrong element",
+        }
     norm_signature = normalize_signature(el["dataTest"] or el["id"] or el["text"] or el["tag"])
     risk, reason = classify(label, el["href"] or None, current_domain, allowed_domains, exclude_patterns)
     return ElementCandidate(
@@ -980,7 +997,8 @@ def _capture_nav_status(page):
     return holder, lambda: page.remove_listener("response", _on_response)
 
 
-def perform_action(page, el_meta: dict, credentials: dict) -> tuple[dict | None, dict, int | None]:
+def perform_action(page, el_meta: dict, credentials: dict,
+                    timeout_ms: int = 8000) -> tuple[dict | None, dict, int | None]:
     """Returns (fill_summary, choice_state, response_status).
     fill_summary is None if this action wasn't a form submission -- see
     fill_enclosing_form. choice_state (see _read_choice_state) is always
@@ -988,7 +1006,16 @@ def perform_action(page, el_meta: dict, credentials: dict) -> tuple[dict | None,
     only and never feeds Transition.form_fields. response_status is the
     main-document HTTP status of whatever navigation this action
     actually caused, or None if it didn't cause one (see
-    _capture_nav_status)."""
+    _capture_nav_status).
+
+    timeout_ms (Aug 2026): was a hard-coded 8000 in four places here
+    until a real crawl of a live production site (alternateqa.com, not
+    a local fixture) showed it wasn't always enough -- a slower/heavier
+    real deploy can genuinely take longer than any local test site to
+    settle. Now threaded from crawler.py's own
+    limits.get("action_timeout_ms", 8000), so a config can raise it for
+    a known-slow site without patching code; 8000 stays the default,
+    identical to every crawl run before this existed."""
     loc = build_locator(page, el_meta)
     if el_meta.get("tag") == "select":
         # build_locator resolves the <select> itself (via its own
@@ -996,9 +1023,9 @@ def perform_action(page, el_meta: dict, credentials: dict) -> tuple[dict | None,
         # discovery time, not whatever happens to be selected on replay.
         holder, remove = _capture_nav_status(page)
         try:
-            loc.select_option(value=el_meta["selectValue"], timeout=8000)
+            loc.select_option(value=el_meta["selectValue"], timeout=timeout_ms)
             try:
-                page.wait_for_load_state("load", timeout=8000)
+                page.wait_for_load_state("load", timeout=timeout_ms)
             except Exception:
                 pass
             _settle(page)
@@ -1009,9 +1036,9 @@ def perform_action(page, el_meta: dict, credentials: dict) -> tuple[dict | None,
     choice_state = _read_choice_state(page, el_meta)
     holder, remove = _capture_nav_status(page)
     try:
-        loc.click(timeout=8000)
+        loc.click(timeout=timeout_ms)
         try:
-            page.wait_for_load_state("load", timeout=8000)
+            page.wait_for_load_state("load", timeout=timeout_ms)
         except Exception:
             pass
         _settle(page)

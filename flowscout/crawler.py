@@ -86,13 +86,20 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
     last_fill_summary = None
     last_choice_state: dict = {}
     last_response_status: int | None = None
+    # Not a required config key -- existing configs/*.json written before
+    # this existed don't have it, same reasoning as max_action_repeat
+    # above. Found necessary on a real production site (alternateqa.com,
+    # not a local fixture): the previous hard-coded 8000ms wasn't always
+    # enough, and there was no way to raise it short of patching code.
+    action_timeout_ms = config.get("limits", {}).get("action_timeout_ms", 8000)
     try:
         page.goto(config["start_url"], wait_until="load")
         page.wait_for_timeout(200)
         for i, t in enumerate(path):
             el_meta = json.loads(t.replay_meta)
             try:
-                fill_summary, choice_state, response_status = perform_action(page, el_meta, credentials)
+                fill_summary, choice_state, response_status = perform_action(
+                    page, el_meta, credentials, timeout_ms=action_timeout_ms)
                 if i == len(path) - 1:
                     last_fill_summary = fill_summary
                     last_choice_state = choice_state

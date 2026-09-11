@@ -181,6 +181,8 @@ button.secondary {
       <div><label for="f-flows">Max flows</label><input id="f-flows" type="number" value="50" min="1"></div>
       <div><label for="f-action-repeat">Max repeats of the same action</label><input id="f-action-repeat" type="number" value="2" min="1"
         title="Caps how many times the same normalized action (e.g. &quot;add to cart&quot; on different products) can be followed within one flow. A third repeat rarely teaches the crawler anything a second one didn't -- this bounds the combinatorial state growth that repeated mutating actions cause (an N-item cart is up to 2^N reachable states) without a blanket depth limit."></div>
+      <div><label for="f-action-timeout">Click/select timeout (seconds)</label><input id="f-action-timeout" type="number" value="8" min="1" step="0.5"
+        title="How long to wait for a click or select_option to succeed before giving up. 8s is enough for most sites, but a slower or heavier real production deploy (not a local test fixture) can genuinely need more -- found on a live crawl where many flows failed with 'Timeout 8000ms exceeded' on a site that was simply slower than that, not broken. Raise this before raising max_depth/max_flows if errors look like this."></div>
     </div>
 
     <h2>Safety</h2>
@@ -508,6 +510,7 @@ function resetForm() {
   document.getElementById('f-states').value = 30;
   document.getElementById('f-flows').value = 50;
   document.getElementById('f-action-repeat').value = 2;
+  document.getElementById('f-action-timeout').value = 8;
   document.getElementById('f-mutating').checked = false;
   document.getElementById('f-domains').value = '';
   document.getElementById('f-exclude').value = '';
@@ -543,6 +546,7 @@ function fillForm(cfg) {
   document.getElementById('f-states').value = limits.max_states ?? 30;
   document.getElementById('f-flows').value = limits.max_flows ?? 50;
   document.getElementById('f-action-repeat').value = limits.max_action_repeat ?? 2;
+  document.getElementById('f-action-timeout').value = (limits.action_timeout_ms ?? 8000) / 1000;
   document.getElementById('f-mutating').checked = !!cfg.allow_mutating;
   document.getElementById('f-domains').value = (cfg.allowed_domains || []).join(', ');
   document.getElementById('f-exclude').value = (cfg.exclude_patterns || []).join(', ');
@@ -597,6 +601,7 @@ function collectConfig() {
       max_states: Number(document.getElementById('f-states').value) || 30,
       max_flows: Number(document.getElementById('f-flows').value) || 50,
       max_action_repeat: Number(document.getElementById('f-action-repeat').value) || 2,
+      action_timeout_ms: Math.round((Number(document.getElementById('f-action-timeout').value) || 8) * 1000),
     },
     allow_mutating: document.getElementById('f-mutating').checked,
     allowed_domains: splitList(document.getElementById('f-domains').value),

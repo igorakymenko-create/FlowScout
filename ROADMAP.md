@@ -2772,3 +2772,191 @@ itself completely unaffected either way. Report HTML confirmed to
 render the note text correctly, alongside (not replacing) the
 existing "back to an already-explored state" note on the same step.
 All 20 existing tests still pass unmodified.
+
+
+## Known limitation — conjunctive multi-parameter gating is invisible to DFS (investigated live, Aug 2026; not fixed)
+
+Asked directly: how effective is the crawler when a page has many
+independent controls (dropdowns/checkboxes/radios) whose *combination*
+gates access to other parts of the page -- e.g. 10 parameters where a
+hidden section only appears once several of them are set together?
+Investigated live, both by reading the code and by building a real
+fixture, rather than reasoning about it in the abstract.
+
+**Root cause, from the code:** `state_fingerprint()`
+([fingerprint.py](flowscout/fingerprint.py#L69-L71)) hashes the URL
+pattern plus the *set of candidate signatures currently on the page* --
+not the current *value* of any control. Toggling a checkbox or picking
+a `<select>`/radio option that doesn't itself reveal or hide any
+element produces the exact same fingerprint as before the click. In
+`_run_dfs()`'s main loop
+([crawler.py:387-399](flowscout/crawler.py#L387-L399)), a candidate
+that lands on an already-known fingerprint is recorded as a "revisit"
+flow and the branch stops there (`continue`) -- the next candidate
+tried is a *sibling* of the one just clicked, from the *same* original
+state, not a continuation past it. Two (or more) parameter choices
+only ever end up in the same explored path if **every intermediate
+step individually changes the visible candidate set** -- there is no
+mechanism to accumulate several simultaneous choices into one
+continued branch otherwise.
+
+**Verified empirically, not just from reading the code.** Built a
+local fixture: 2 checkboxes + 1 `<select>`, with a hidden link
+revealed only when all three are set to specific values *together*
+(`cbA` checked AND `cbB` checked AND `selC == "yes"`) -- no single
+control, and no partial combination, changes anything by itself.
+Crawled it with generous limits (`max_depth: 6, max_breadth_per_state:
+20, max_states: 100, max_flows: 100`):
+
+```
+States discovered: 1
+Flows total: 4
+flow 1 [unique]: ['Select "No" in "sel-c"']
+flow 2 [unique]: ['Select "Yes" in "sel-c"']
+flow 3 [unique]: ['Toggle "Enable A"']
+flow 4 [unique]: ['Toggle "Enable B"']
+Secret feature EVER discovered as a candidate: False
+```
+
+Exactly one state (the root) was ever discovered; every flow tries
+exactly one action and stops. The hidden link was never found.
+Confirmed separately, via a direct Playwright script setting all three
+controls before checking, that the fixture's own logic is correct and
+the link genuinely does appear once all three conditions are met --
+this is a real gap in the crawler, not a fixture bug.
+
+**When it does work, and its own limits even then.** If each parameter
+individually causes *some* observable change (even a small one --
+a new candidate appearing, one disappearing), DFS can chain multiple
+picks into a deeper, combined path, because each step becomes a
+genuinely new state. But even then, full-factorial coverage of many
+parameters is not computationally realistic: `max_breadth_per_state`
+caps how many candidates get tried from any one state (so some
+variants of some parameters are dropped before ever being tried), and
+`max_states`/`max_flows` cap the whole run's total exploration budget
+-- 10 parameters at even 3-4 options each is already thousands to
+millions of combinations, far beyond any practical budget. Exploration
+in that regime is a DFS-order-biased *sample* of the combinatorial
+space, not exhaustive coverage, even before the conjunctive-gating
+case above is considered.
+
+**Not fixed here -- this is a design limitation of DFS-over-fingerprint
+itself, not a bug with a small patch.** The real-world technique for
+this class of problem is pairwise/all-pairs (combinatorial) testing --
+covering every *pair* of parameter values rather than every
+combination, which turns exponential growth into roughly quadratic
+growth and catches the large majority of real interaction bugs in
+practice. Building that would mean a genuinely new exploration
+mode (generating specific value-sets and setting them all before
+checking page state, not click-by-click DFS) rather than a change to
+the existing crawl loop. Not started -- parked here as a real,
+verified gap until there's a concrete site/scenario to justify the
+investment.
+
+
+## Real production crawl (alternateqa.com) surfaced three real bugs (done, Aug 2026)
+
+The user reported a real crawl of their own site
+(https://alternateqa.com/, a live production app, not a local fixture)
+where many flows failed with `Locator.click: Timeout 8000ms exceeded`
+against `a[href="/academy"]` and `get_by_text("Get Team License",
+exact=True)`, and separately that clicking "Resume this flow" after
+raising `max_depth` showed "Resuming…" indefinitely with no visible
+result. Investigated by reproducing directly against the live site --
+not by reasoning about the error text alone.
+
+**Reproduced live**, a small real crawl of alternateqa.com
+(`max_depth: 3, max_breadth_per_state: 8, max_states: 15, max_flows:
+15`, `allow_mutating: false`): 3 checkpoints, all genuine, in 90
+seconds against a 15-flow crawl -- confirming the site itself is
+slow/error-prone enough for this to be a real, recurring pattern, not
+a one-off.
+
+**Bug 1 (real crawler bug) -- `build_locator()`'s final fallback
+resolves to an unrelated hidden element when text is empty.**
+[actions.py](flowscout/actions.py)'s locator strategy falls through
+dataTest → id → radio/checkbox → href → `get_by_text(el_meta["text"],
+exact=True)`. For an icon-only button with none of the above (no
+aria-label, no data-test, no id -- confirmed by the generic `"Click
+'button'"` label, meaning label fell all the way to the bare tag
+name), this becomes `get_by_text("", exact=True)` -- an empty-string
+match, which resolved on the live site to `<div hidden="">`, then
+hung for the full click timeout waiting for it to become visible.
+**Fixed** in `_build_candidate()`: when dataTest, id, href AND text
+are all empty, the element is reported the same way an occluded
+candidate already is (`{"label": ..., "reason": "no reliable locator
+..."}`-shaped, visible in the report's Safety register, never
+explored) instead of building a candidate around a locator guaranteed
+to resolve to the wrong element. Re-crawling the identical config
+afterward: checkpoints dropped from 3 to 2, the `"Click 'button'"`
+error gone entirely, and the freed-up flow budget (max_flows: 15) let
+the crawler reach two more real pages instead of burning a slot on a
+doomed click.
+
+**Bug 2 (real, but NOT fixed by choice) -- discovery-time occlusion
+can go stale by click time.** The `/settings` link's own timeout
+detail shows Playwright's own diagnosis plainly: the element *is*
+visible/enabled/stable and gets scrolled into view, but a *different*
+`<button>` intercepts the pointer event at click time -- most likely a
+modal/overlay (the link's own label, "Go to Settings to enter your
+key", reads like an API-key-prompt CTA) that appeared *after*
+`_DISCOVER_JS`'s own occlusion check ran. FlowScout only checks
+occlusion once, at discovery; nothing re-checks right before the
+actual click. Considered fixing this too (an explicit design option
+offered to the user) but **left alone by explicit choice** -- a
+"re-check occlusion right before clicking" heuristic needs its own
+investigation on real sites with real overlays to avoid trading one
+false negative for false positives elsewhere, and the timeout increase
+below (Bug 3) already gives Playwright's own actionability retry loop
+more chances to succeed if the overlay is transient.
+
+**Bug 3 (real gap, not really a "bug") -- the 8000ms click/select
+timeout was hard-coded, twice, with no way to raise it.**
+`perform_action()` had `timeout=8000` baked into both `loc.click()`
+and `loc.select_option()` (plus their own `wait_for_load_state`
+calls) -- fine for local fixtures and most sites, evidently not always
+enough for this one real production deploy. **Fixed:** new
+`limits.action_timeout_ms` (default `8000`, identical to every crawl
+before this existed), threaded from `_run_path()`'s own
+`config.get("limits", {}).get("action_timeout_ms", 8000)` through
+`perform_action(..., timeout_ms=...)` to every one of the four
+call sites. Exposed in the web UI too (`index.html`'s config form,
+"Click/select timeout (seconds)" -- seconds in the UI, milliseconds in
+the config, converted both ways) so an operator can actually use this
+without hand-editing JSON. **Verified live, directly against
+`perform_action()`** (bypassing discovery so the test isn't
+confounded by the already-existing discovery-time occlusion filter):
+an element made unclickable (`pointer-events: none`) until 2000ms
+after load. `timeout_ms=800` failed in 0.8s (`TimeoutError`);
+`timeout_ms=5000` succeeded once the element became clickable, in
+2.6s total -- conclusively proving the parameter reaches Playwright's
+real timeout, not just a config field nobody reads.
+
+**Investigated separately (not a bug) -- `resume_flow()` isn't stuck,
+it's just genuinely slow on a slow site.** Loaded the real
+alternateqa.com run above and called `resume_flow()` directly
+(bypassing the browser/web UI entirely) on its own `"Get Team
+License"` flow (matching the user's second reported error) with
+`max_depth: 6`: **it completed successfully in 168.4 seconds**,
+producing 11 new flows. Not a hang -- a resumed flow replays its
+entire path from a fresh browser for every candidate it tries, then
+keeps exploring from there, and on a site with repeated 8-second
+timeouts that adds up to minutes fast. The real problem is that
+[report.py](flowscout/report.py)'s `_resume_script_html()` showed a
+completely static `"Resuming…"` for that whole time, indistinguishable
+from actually being stuck. **Fixed** with a client-side-only elapsed-
+time ticker (`setInterval`, cleared in a `finally`) --
+`"Resuming… (47s elapsed — this can take several minutes on slower
+sites)"` -- no backend change, since there was nothing actually broken
+on the backend to fix. Separately: the current local server's own log
+showed zero `POST /resume` requests ever received during this
+investigation, meaning the user's original stuck click most likely
+happened against a different server session (or the request never
+left the browser) -- flagged back to the user to check the browser's
+Network tab if it recurs, rather than guessed at further without
+evidence.
+
+**All three fixes verified together**: all 20 existing tests still
+pass; no Playwright browser processes left running after any of the
+live verification crawls (checked via `Get-CimInstance Win32_Process`
+for headless/playwright chrome processes -- zero).

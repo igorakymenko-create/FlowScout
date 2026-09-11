@@ -528,7 +528,22 @@ async function flowscoutResume(runId, flowId, btn) {
   const allowMutating = box.querySelector('.resume-mutating').checked;
   const statusEl = box.querySelector('.resume-status');
   btn.disabled = true;
-  statusEl.textContent = 'Resuming…';
+  // Elapsed-time ticker (Aug 2026): a resumed flow replays its entire
+  // path from a fresh browser for every candidate it tries, then keeps
+  // exploring from there -- on a real, slower production site (not a
+  // fast local fixture) this can genuinely take minutes, not seconds
+  // (measured live: one real resume took 168s). A static "Resuming…"
+  // with no elapsed time is indistinguishable from "stuck" well before
+  // that -- this is a client-side-only fix (nothing is actually wrong
+  // on the backend to fix) that just says so plainly instead of going
+  // quiet.
+  const startedAt = Date.now();
+  const tick = () => {
+    const secs = Math.round((Date.now() - startedAt) / 1000);
+    statusEl.textContent = `Resuming… (${secs}s elapsed — this can take several minutes on slower sites)`;
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
   try {
     const res = await fetch(`/api/runs/${runId}/resume`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -545,6 +560,8 @@ async function flowscoutResume(runId, flowId, btn) {
   } catch (e) {
     statusEl.textContent = 'Failed: ' + e;
     btn.disabled = false;
+  } finally {
+    clearInterval(timer);
   }
 }
 </script>"""
