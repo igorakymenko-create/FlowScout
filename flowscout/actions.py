@@ -1294,16 +1294,102 @@ def _capture_nav_status(page):
     return holder, lambda: page.remove_listener("response", _on_response)
 
 
-def perform_action(page, el_meta: dict, credentials: dict,
-                    timeout_ms: int = 8000) -> tuple[dict | None, dict, int | None]:
-    """Returns (fill_summary, choice_state, response_status).
+def _capture_dialog(page):
+    """Registers a dialog listener for the duration of one action --
+    catches alert()/confirm()/prompt()/beforeunload triggered by the
+    click itself. Playwright's own documented default with NO listener
+    at all is to silently auto-dismiss every dialog -- found live that
+    this makes a "Delete" button gated behind `confirm("Are you
+    sure?")` LOOK like an ordinary, inert click: the confirm always
+    resolves to Cancel, nothing on the page changes, and the crawler
+    records a completely unremarkable "revisit", with zero signal that
+    a real, consequential dialog even existed.
+
+    ACCEPTS every dialog instead of the previous silent-dismiss
+    default -- deliberately, not a softer default: risk classification
+    and `allow_mutating` already decided, before this click ever
+    happened, whether this specific action was safe/acceptable to
+    perform at all (see risk.py). A confirm() the app shows immediately
+    afterward is procedurally part of THAT SAME action, not a separate
+    decision point -- auto-rejecting it would silently prevent an
+    already-opted-into mutating action from ever actually completing,
+    the opposite of what allow_mutating=true is FOR. `dialog.accept()`
+    on a prompt() uses whatever default text the dialog itself offers
+    (Playwright's own behavior), not a synthesized value.
+
+    Returns (holder_dict, remove_fn) -- read holder["messages"] (a
+    list of "type: message" strings, ordinarily zero or one) after the
+    action, then always call remove_fn()."""
+    holder = {"messages": []}
+
+    def _on_dialog(dialog):
+        try:
+            holder["messages"].append(f"{dialog.type}: {dialog.message}")
+        except Exception:
+            pass
+        try:
+            dialog.accept()
+        except Exception:
+            pass  # already handled by another listener, or the page tore down mid-dialog
+
+    page.on("dialog", _on_dialog)
+    return holder, lambda: page.remove_listener("dialog", _on_dialog)
+
+
+def _capture_new_page(page):
+    """Registers a listener for a new page/tab opening as a direct
+    result of one action (a target="_blank" link, window.open(), ...)
+    -- previously completely invisible: the crawler always keeps
+    looking at the SAME page object it started the replay with, so a
+    spawned tab's own URL never changes anything the crawler can see.
+    The click gets recorded as an ordinary "revisit" (identical
+    fingerprint, nothing about THIS page changed) -- indistinguishable
+    from a genuinely inert click, even though a whole new page just
+    opened.
+
+    Does NOT follow the new tab -- a much bigger architectural change
+    (this crawler explores exactly one page per replay path); this
+    only reports that one appeared and where it pointed, so the report
+    at least states the fact instead of staying silent. The spawned
+    page closes on its own when the browser context itself does, at
+    the end of this replay -- no separate cleanup needed here.
+
+    Returns (holder_dict, remove_fn) -- read holder["url"] after the
+    action, then always call remove_fn()."""
+    holder = {"url": None}
+
+    def _on_page(new_page):
+        if holder["url"] is not None:
+            return  # first one wins -- extra popups from the same click aren't this signal's job
+        try:
+            new_page.wait_for_load_state("load", timeout=3000)
+        except Exception:
+            pass
+        try:
+            holder["url"] = new_page.url
+        except Exception:
+            pass
+
+    page.context.on("page", _on_page)
+    return holder, lambda: page.context.remove_listener("page", _on_page)
+
+
+def perform_action(page, el_meta: dict, credentials: dict, timeout_ms: int = 8000
+                    ) -> tuple[dict | None, dict, int | None, str, str | None]:
+    """Returns (fill_summary, choice_state, response_status,
+    dialog_message, opened_new_page).
     fill_summary is None if this action wasn't a form submission -- see
     fill_enclosing_form. choice_state (see _read_choice_state) is always
     a dict, empty if there was nothing to observe; it's for the label
     only and never feeds Transition.form_fields. response_status is the
     main-document HTTP status of whatever navigation this action
     actually caused, or None if it didn't cause one (see
-    _capture_nav_status).
+    _capture_nav_status). dialog_message is "" if no alert()/confirm()/
+    prompt()/beforeunload fired, else each one's "type: message" joined
+    by "; " (see _capture_dialog -- every dialog is accepted, not
+    silently dismissed). opened_new_page is the URL of a new tab/page
+    this action spawned (a target="_blank" link, window.open()), or
+    None if it didn't (see _capture_new_page -- observed, not followed).
 
     timeout_ms (Aug 2026): was a hard-coded 8000 in four places here
     until a real crawl of a live production site (alternateqa.com, not
@@ -1329,6 +1415,8 @@ def perform_action(page, el_meta: dict, credentials: dict,
                 f"(waited {occlusion_grace_ms}ms for it to clear) -- not attempted"
             )
         holder, remove = _capture_nav_status(page)
+        dlg_holder, dlg_remove = _capture_dialog(page)
+        page_holder, page_remove = _capture_new_page(page)
         try:
             _click_with_occlusion_retry(
                 lambda t: loc.select_option(value=el_meta["selectValue"], timeout=t), timeout_ms)
@@ -1339,7 +1427,9 @@ def perform_action(page, el_meta: dict, credentials: dict,
             _settle(page)
         finally:
             remove()
-        return None, {}, holder["status"]
+            dlg_remove()
+            page_remove()
+        return None, {}, holder["status"], "; ".join(dlg_holder["messages"]), page_holder["url"]
     fill_summary = fill_enclosing_form(page, el_meta, credentials)
     choice_state = _read_choice_state(page, el_meta)
     blocker = _wait_until_unoccluded(page, loc, max_wait_ms=occlusion_grace_ms)
@@ -1349,6 +1439,8 @@ def perform_action(page, el_meta: dict, credentials: dict,
             f"(waited {occlusion_grace_ms}ms for it to clear) -- not attempted"
         )
     holder, remove = _capture_nav_status(page)
+    dlg_holder, dlg_remove = _capture_dialog(page)
+    page_holder, page_remove = _capture_new_page(page)
     try:
         _click_with_occlusion_retry(lambda t: loc.click(timeout=t), timeout_ms)
         try:
@@ -1358,7 +1450,9 @@ def perform_action(page, el_meta: dict, credentials: dict,
         _settle(page)
     finally:
         remove()
-    return fill_summary, choice_state, holder["status"]
+        dlg_remove()
+        page_remove()
+    return fill_summary, choice_state, holder["status"], "; ".join(dlg_holder["messages"]), page_holder["url"]
 
 
 _OCCLUSION_CHECK_JS = """(el) => {

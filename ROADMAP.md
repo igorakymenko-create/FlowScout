@@ -3702,3 +3702,92 @@ Remaining items from the same audit (iframes, Shadow DOM, native
 dialogs, `target="_blank"`/popups, negative-input scenarios being
 fingerprint-blind) are real but deliberately not addressed in this
 pass -- this was the single highest-value item chosen first.
+
+
+## Native dialogs (confirm/alert/prompt) and target="_blank"/popups (done, Aug 2026)
+
+Second item from the same coverage audit. Investigated both live
+before building anything -- and both matched the audit's own
+hypothesis exactly, with the real mechanism confirmed rather than
+guessed:
+
+**Dialogs**: Playwright's own documented default with NO `dialog`
+listener registered is to silently auto-dismiss every
+`alert()`/`confirm()`/`prompt()`/`beforeunload` -- and FlowScout
+registered none anywhere. Built a fixture: a "Delete" button gated
+behind `confirm("Are you sure you want to delete this?")`. Confirmed
+live: the confirm always resolved to Cancel, the page's own `#result`
+div said `"CANCELLED"`, and the crawler recorded a completely
+unremarkable revisit -- zero signal that a real, consequential dialog
+had even appeared. (A first attempt at this same test registered a
+passive `page.on("dialog", ...)` listener that never resolved the
+dialog itself -- Playwright's behavior changes the moment ANY listener
+exists: it stops auto-dismissing and waits for the listener to decide,
+so that version hung until timeout. Caught before drawing the wrong
+conclusion from a test-script artifact, not from real crawler code.)
+
+**Popups**: a `target="_blank"` link. Confirmed live: clicking it opens
+a genuinely new page in the browser context (`len(context.pages)` goes
+1 → 2), but the crawler's own `_discover_state()` only ever looks at
+the ORIGINAL page object, whose URL never changes -- recorded as an
+ordinary revisit, with the entire new tab (and everything reachable
+from it) structurally invisible, not merely deprioritized.
+
+**Built, both as pure visibility signals -- same "state the fact,
+don't invent behavior" principle as `response_status`/
+`anchor_target_missing`:**
+
+- `actions.py`'s new `_capture_dialog(page)`: registers a listener that
+  **accepts** every dialog (a deliberate choice, not a softer default)
+  while recording its `"type: message"`. Reasoning: risk classification
+  and `allow_mutating` already decided, before the click ever happened,
+  whether this specific action was acceptable to perform at all -- a
+  `confirm()` the app shows immediately afterward is procedurally part
+  of THAT SAME action, not a separate decision point. Auto-rejecting
+  it (Playwright's own old default) would silently prevent an
+  already-opted-into mutating action from ever actually completing --
+  the opposite of what `allow_mutating=true` is for.
+- `actions.py`'s new `_capture_new_page(page)`: registers a listener on
+  the page's own browser context for a new page/tab opening as a
+  direct result of the action, records its URL. Does NOT follow it --
+  a much bigger architectural change (this crawler explores exactly
+  one page per replay path) -- only reports that one appeared. Closes
+  on its own when the context does; no separate cleanup needed.
+- `perform_action()`'s return signature grew from a 3-tuple to a
+  5-tuple (`..., dialog_message, opened_new_page`); threaded through
+  `_run_path()`'s own return tuple (9 → 11 elements) and all three of
+  its call sites in `crawler.py` (the main DFS loop, `crawl()`'s root
+  discovery, `explore_combination()`), the same mechanical pattern
+  already used for `response_status`/`anchor_target_missing`.
+- `models.py`: new `Transition.dialog_message: str` and
+  `Transition.opened_new_page: Optional[str]`.
+- `report.py`: two new additive step notes (`"→ dialog: confirm: Are
+  you sure..."`, `"→ opened a new tab: <url> (not explored -- crawler
+  stays on this page)"`), alongside whatever outcome note a step
+  already had, same as `response_status`'s own note.
+
+**Verified live, through the FULL real `crawl()` pipeline, not just
+`perform_action()` in isolation:** the same two-fixture page crawled
+end to end --
+
+```
+flow 1: 'Open "Open in new tab"'
+    dialog_message=''
+    opened_new_page='http://127.0.0.1:8944/other-page'
+flow 2: 'Click "Delete item"'
+    dialog_message='confirm: Are you sure you want to delete this?'
+    opened_new_page=None
+```
+
+-- both fields correctly populated, both new report notes present in
+the rendered HTML. Separately confirmed the accept-by-default design
+actually works as intended, not just that it doesn't crash: flow 2's
+own `end_state_fp` resolved to `/deleted`, not back to `/` -- the
+delete genuinely went through, where Playwright's old silent-dismiss
+default would have silently cancelled it every time. Regression
+check: a full live crawl of saucedemo.com (real login form, no
+dialogs/popups involved at all) -- identical shape to before, zero
+new checkpoints, confirming the two new listeners registered on every
+single action add no observable side effect to ordinary crawls.
+
+All 20 existing tests still pass; no leftover Playwright processes.

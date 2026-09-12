@@ -145,6 +145,28 @@ class Transition:
     # even happens (it's a fact about the DOM at discovery time, not about
     # what the click did), unlike response_status which only exists after.
     anchor_target_missing: bool = False
+    # "" if this action didn't trigger a native alert()/confirm()/
+    # prompt()/beforeunload dialog; otherwise each one's "type: message"
+    # joined by "; " (see actions.py's _capture_dialog -- every dialog
+    # is accepted, not silently dismissed, since risk classification and
+    # allow_mutating already decided whether this action was worth
+    # performing at all before the click ever happened). Found worth
+    # adding directly from a live question: a "Delete" button gated
+    # behind confirm() previously looked exactly like an ordinary,
+    # inert click -- Playwright's own default (auto-dismiss with no
+    # listener) meant the confirm always resolved to Cancel, with
+    # nothing anywhere recording that a real, consequential dialog had
+    # even appeared.
+    dialog_message: str = ""
+    # The URL of a new tab/page this action spawned (a target="_blank"
+    # link, window.open()), or None if it didn't (see actions.py's
+    # _capture_new_page). Purely observational -- the crawler still
+    # only ever explores the ONE page it started this replay with;
+    # this exists so a spawned tab's entire existence isn't silently
+    # invisible, recorded as an ordinary "revisit" indistinguishable
+    # from a genuinely inert click just because the ORIGINAL page's
+    # own fingerprint never changed.
+    opened_new_page: Optional[str] = None
 
 
 @dataclass

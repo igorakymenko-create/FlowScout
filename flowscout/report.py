@@ -55,6 +55,23 @@ def _flow_steps_html(flow, states: dict) -> str:
                 ' <span class="step-note step-error">'
                 '→ this link\'s anchor target doesn\'t exist on the page</span>'
             )
+        # dialog_message/opened_new_page (Aug 2026): both pure
+        # visibility signals, same "state the fact" principle as
+        # response_status/anchor_target_missing above -- neither
+        # changes what got crawled. A native confirm()/alert()/prompt()
+        # was previously invisible (Playwright's own default silently
+        # auto-dismisses it with no listener registered, so a "Delete"
+        # button gated behind confirm() looked like an ordinary, inert
+        # click); a target="_blank"/window.open() spawned tab was
+        # equally invisible, since the crawler only ever looks at the
+        # ORIGINAL page, whose own fingerprint never changed.
+        if t.dialog_message:
+            outcome_note += f' <span class="step-note">→ dialog: {_esc(t.dialog_message)}</span>'
+        if t.opened_new_page:
+            outcome_note += (
+                f' <span class="step-note">→ opened a new tab: {_esc(t.opened_new_page)} '
+                f'(not explored -- crawler stays on this page)</span>'
+            )
         parts.append(
             f'<li class="step"><span class="step-idx">{i + 1}</span>'
             f'<span class="step-page">{page}</span>'
