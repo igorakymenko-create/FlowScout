@@ -46,6 +46,13 @@ writes your tests for you" — and a more honest one.
   reach (see `ROADMAP.md`'s "conjunctive multi-parameter gating"
   entry) — pick the values, and exploration continues automatically
   from whatever that combination reveals.
+- **Seeds additional entry points** the DFS can't click its way to on
+  its own: a `sitemap.xml` URL (fetched and parsed automatically,
+  including a sitemap index of child sitemaps) and/or an explicit list
+  of known URLs. Each one is explored with the crawler's full normal
+  logic from there onward, not just visited once — finding pages with
+  no inbound link anywhere in the crawled UI (a deep-linked SPA route,
+  an old landing page delisted from navigation).
 - A **local operator UI** (FastAPI + vanilla JS, no build step) to
   configure and run crawls, attach a TCMS export, and browse reports —
   or drive all of this from the CLI / a CI job instead.

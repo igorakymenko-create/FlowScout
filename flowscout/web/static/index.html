@@ -196,6 +196,13 @@ button.secondary {
     <input id="f-exclude" type="text" placeholder="*/privacy*, */terms*">
     <p class="hint">Matched pages are treated as destructive — never visited, regardless of the toggle above.</p>
 
+    <h2>Direct URL seeding <button type="button" class="icon-btn help-trigger" data-help="seed-urls" title="What this is for">?</button></h2>
+    <label for="f-sitemap-url">Sitemap URL (optional)</label>
+    <input id="f-sitemap-url" type="text" placeholder="https://example.com/sitemap.xml">
+    <label for="f-seed-urls">Additional seed URLs (comma-separated)</label>
+    <input id="f-seed-urls" type="text" placeholder="https://example.com/deep-linked-page">
+    <p class="hint">Explored just like start_url — the crawler clicks around from each one too, not just visits it. Filtered by Allowed domains/Exclude URL patterns above, same as any other link.</p>
+
     <h2>Embeddings provider <button type="button" class="icon-btn help-trigger" data-help="embeddings-provider" title="What this affects and what 'unverified' means">?</button></h2>
     <p class="hint">Used by both Semantic dedup and Gap analysis below — one choice for both, since a run only ever picks one provider. Only providers with a key set (see badges above) will actually work.</p>
     <label for="f-embeddings-provider">Provider</label>
@@ -281,6 +288,9 @@ button.secondary {
 
       <h4>Exclude URL patterns</h4>
       <p>Glob patterns (e.g. <code>*/privacy*</code>) for pages you never want visited — legal pages, social links, anything not worth the crawl budget or not safe to touch. Same treatment as an external domain: always <b>destructive</b>, independent of the mutating toggle. Doesn't apply to in-page anchors (e.g. <code>#faq</code>) — only real page navigations have a path to match against.</p>
+
+      <h4 id="help-seed-urls">Direct URL seeding</h4>
+      <p>The crawler otherwise only ever finds what it can click its way to from Start URL — a page with no inbound link anywhere in the crawled UI (a deep-linked SPA route, an old landing page still live but delisted from navigation) is invisible no matter how thoroughly the rest of the app gets explored. A <b>Sitemap URL</b> is fetched and parsed automatically (a plain sitemap, or a sitemap index of child sitemaps, recursed one level); <b>Additional seed URLs</b> is a plain list you already know about. Either way, each one is explored with the crawler's full normal logic from there onward, not just visited once and left alone — reported as its own "Open URL directly" flow, plus whatever it leads to. Filtered exactly like an ordinary link: dropped if outside Allowed domains, dropped if it matches an Exclude URL pattern, dropped if it's just Start URL itself. Capped at 50 seed URLs by default (a real sitemap can list thousands; raise it with <code>max_seed_urls</code> in a JSON config if you actually want that).</p>
 
       <h4 id="help-embeddings-provider">Embeddings provider</h4>
       <p>Both Semantic dedup and Gap analysis need a text-embeddings API call to compare flows/test cases by meaning, not just exact text. Gemini was the only option originally; OpenAI and Voyage AI (Anthropic's own recommended embeddings partner — Anthropic has no embeddings model of its own) were added so an operator without a Gemini key isn't stuck. <b>Gemini's integration is the one that's actually been exercised against real API calls, repeatedly, throughout this project's development. OpenAI's and Voyage's were built from each provider's documented API contract without a live key to test against — the ⚠ on their badge above means exactly that: verify with a real key before trusting the results, the same discipline every other feature here was held to.</b> The 0.95 (dedup) and 0.74 (gap analysis) thresholds below were both measured empirically against Gemini's own similarity distribution; a different provider's embedding space won't necessarily cluster the same way at the same numbers.</p>
@@ -514,6 +524,8 @@ function resetForm() {
   document.getElementById('f-mutating').checked = false;
   document.getElementById('f-domains').value = '';
   document.getElementById('f-exclude').value = '';
+  document.getElementById('f-sitemap-url').value = '';
+  document.getElementById('f-seed-urls').value = '';
   document.getElementById('f-embeddings-provider').value = 'gemini';
   document.getElementById('f-semantic').checked = true;
   document.getElementById('f-threshold').value = 0.95;
@@ -550,6 +562,8 @@ function fillForm(cfg) {
   document.getElementById('f-mutating').checked = !!cfg.allow_mutating;
   document.getElementById('f-domains').value = (cfg.allowed_domains || []).join(', ');
   document.getElementById('f-exclude').value = (cfg.exclude_patterns || []).join(', ');
+  document.getElementById('f-sitemap-url').value = cfg.sitemap_url || '';
+  document.getElementById('f-seed-urls').value = (cfg.seed_urls || []).join(', ');
   document.getElementById('f-embeddings-provider').value = cfg.embeddings_provider || 'gemini';
   const sem = cfg.semantic_dedup || {};
   document.getElementById('f-semantic').checked = sem.enabled !== false;
@@ -606,6 +620,8 @@ function collectConfig() {
     allow_mutating: document.getElementById('f-mutating').checked,
     allowed_domains: splitList(document.getElementById('f-domains').value),
     exclude_patterns: splitList(document.getElementById('f-exclude').value),
+    sitemap_url: document.getElementById('f-sitemap-url').value.trim(),
+    seed_urls: splitList(document.getElementById('f-seed-urls').value),
     embeddings_provider: document.getElementById('f-embeddings-provider').value || 'gemini',
     semantic_dedup: {
       enabled: document.getElementById('f-semantic').checked,

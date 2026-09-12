@@ -23,7 +23,11 @@ from __future__ import annotations
 
 import json
 import time
+import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
+from urllib.parse import urlsplit
 
 from .actions import discover_candidates, perform_action, current_domain, describe_action
 from .fingerprint import normalize_url, state_fingerprint
@@ -31,6 +35,106 @@ from .models import (
     Checkpoint, ElementCandidate, Flow, FlowStatus, Risk, RunResult, StateNode, Transition,
 )
 from .semantic_dedup import DEFAULT_THRESHOLD, apply_semantic_dedup
+
+
+def _local_tag(tag: str) -> str:
+    """Strips a namespace prefix off an XML tag ('{http://...}loc' ->
+    'loc') -- sitemap.xml is supposed to declare the sitemaps.org
+    namespace, but real-world sitemaps generating tools sometimes omit
+    it. Matching on the local name only handles both without needing
+    two separate code paths."""
+    return tag.rsplit("}", 1)[-1]
+
+
+def _fetch_sitemap_urls(sitemap_url: str, _depth: int = 0, _max_depth: int = 2) -> list[str]:
+    """Fetches and parses a sitemap.xml: either a plain <urlset> of
+    <url><loc> page entries, or a <sitemapindex> of <sitemap><loc>
+    entries each pointing at a CHILD sitemap (the standard way a large
+    site splits its sitemap into per-section files) -- recursed up to
+    `_max_depth` levels. Stdlib-only (urllib.request + xml.etree),
+    matching this project's existing convention (see embeddings.py's
+    own urllib.request usage) rather than adding a new HTTP dependency
+    for this one feature. Raises on a genuinely unreachable/malformed
+    sitemap -- the caller (_resolve_seed_urls) is the one that decides
+    that's non-fatal to the crawl as a whole and records why."""
+    with urllib.request.urlopen(sitemap_url, timeout=10) as resp:
+        raw = resp.read()
+    root = ET.fromstring(raw)
+    locs = [el.text.strip() for el in root.iter() if _local_tag(el.tag) == "loc" and el.text]
+    if _local_tag(root.tag) == "sitemapindex" and _depth < _max_depth:
+        urls: list[str] = []
+        for child_sitemap in locs:
+            try:
+                urls.extend(_fetch_sitemap_urls(child_sitemap, _depth + 1, _max_depth))
+            except Exception:
+                continue  # one broken child sitemap shouldn't sink the whole resolution
+        return urls
+    return locs
+
+
+def _resolve_seed_urls(config: dict, allowed_domains: list[str], run: RunResult) -> list[str]:
+    """Direct-URL seeding (Sep 2026): the crawler otherwise only ever
+    finds what it can DFS its way to by clicking from start_url -- a
+    page with no inbound link anywhere in the crawled UI (a deep-linked
+    SPA route, an old promo landing page still live but delisted from
+    navigation) is structurally unreachable no matter how thoroughly
+    the rest of the app is explored. `config["seed_urls"]` (an explicit
+    list) and/or `config["sitemap_url"]` (fetched and parsed
+    automatically) name known URLs to treat as ADDITIONAL entry points,
+    each explored with the crawler's full normal DFS machinery from
+    there onward -- not just visited and left alone.
+
+    Filtered the same way ordinary candidate hrefs already are (see
+    risk.classify): dropped if its domain isn't in `allowed_domains`
+    (an external sitemap entry is exactly as out-of-scope as an
+    external link would be) or its path matches an exclude_pattern.
+    Also dropped if it normalizes to the same state as start_url
+    itself -- nothing new to seed there. Capped at
+    `config.get("max_seed_urls", 50)`, applied AFTER filtering, since a
+    real sitemap can easily list thousands of URLs and this crawler's
+    per-seed exploration cost is the same as crawling an entire extra
+    site; the operator raises the cap deliberately, not by accident.
+
+    A sitemap fetch/parse failure is recorded as a checkpoint (not
+    raised) -- seeding is additive to an otherwise-normal crawl, so one
+    unreachable/malformed sitemap shouldn't take down the whole run,
+    the same "degrade, don't abort" principle skipped_candidates and
+    every other soft-failure path in this project already follows."""
+    urls: list[str] = list(config.get("seed_urls", []))
+    sitemap_url = config.get("sitemap_url")
+    if sitemap_url:
+        try:
+            urls.extend(_fetch_sitemap_urls(sitemap_url))
+        except Exception as exc:
+            run.checkpoints.append(Checkpoint(
+                kind="blocked", flow_id=None, state_fp=None,
+                message="Could not fetch/parse sitemap_url -- direct-URL seeding skipped for it",
+                detail=str(exc)[:500],
+            ))
+
+    exclude_patterns = config.get("exclude_patterns", [])
+    start_domain = current_domain(config["start_url"])
+    start_norm = normalize_url(config["start_url"])
+    max_seed_urls = config.get("max_seed_urls", 50)
+
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for u in urls:
+        if u in seen:
+            continue
+        seen.add(u)
+        if normalize_url(u) == start_norm:
+            continue
+        domain = current_domain(u)
+        if domain and domain not in allowed_domains and domain != start_domain:
+            continue
+        path = urlsplit(u).path or u
+        if any(fnmatch(path, p) for p in exclude_patterns):
+            continue
+        filtered.append(u)
+        if len(filtered) >= max_seed_urls:
+            break
+    return filtered
 
 
 @dataclass
@@ -509,11 +613,23 @@ def crawl(config: dict) -> RunResult:
     run = RunResult(project=config["project"], start_url=config["start_url"], config=config)
     run.started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+    # Direct-URL seeding (see _resolve_seed_urls's own docstring) --
+    # resolved once up front, before the browser even launches, same as
+    # every other config-level decision (limits, personas) above.
+    seed_urls = _resolve_seed_urls(config, allowed_domains, run)
+
     next_flow_id = [1]
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         root_fp: str | None = None
+        # Discovered once (by the first persona), reused by every later
+        # one -- same reasoning as root_fp: a direct-nav transition
+        # ignores `credentials` entirely (see actions.py's perform_action,
+        # tag == "direct-nav"), so what a seed URL shows depends only on
+        # the URL itself, never on which persona is walking, exactly like
+        # the empty-path root state above.
+        seed_fps: dict[str, str] = {}
 
         for persona in personas:
             persona_name = persona.get("name", "default")
@@ -557,6 +673,54 @@ def crawl(config: dict) -> RunResult:
             root_frame = _Frame(fp=root_fp)
             root_frame.order = _order_for(root_node, max_breadth, run, revisit_history)
             stack: list[_Frame] = [root_frame]
+
+            # One additional root-like frame per seed URL -- each starts
+            # its own full DFS exploration from wherever that URL lands,
+            # exactly like root_frame does from start_url. Built fresh
+            # per persona (a fresh Transition instance each time, not
+            # shared/mutated across personas) since to_fp/response_status/
+            # etc. get written onto it below and a later persona must not
+            # see an earlier persona's own values there.
+            for seed_url in seed_urls:
+                # "text" is just for a shorter, readable label (the path,
+                # not the whole absolute URL) -- perform_action's own
+                # direct-nav replay only ever reads "href".
+                seed_el_meta = {"tag": "direct-nav", "href": seed_url,
+                                 "text": urlsplit(seed_url).path or seed_url}
+                seed_trial = Transition(
+                    from_fp="", to_fp=None,
+                    action_label=describe_action(seed_el_meta, None),
+                    action_norm_signature=f"direct-nav:{normalize_url(seed_url)}",
+                    risk=Risk.SAFE, risk_reason="operator-specified seed URL",
+                    replay_meta=json.dumps(seed_el_meta),
+                )
+                if seed_url not in seed_fps:
+                    seed_result = _run_path(browser, config, [seed_trial], run, credentials)
+                    if seed_result is None:
+                        # Already recorded as a checkpoint by _run_path
+                        # itself (an error, not a warning) -- this seed
+                        # URL just isn't explorable, nothing more to do.
+                        continue
+                    (seed_fp, seed_url_pat, seed_title, seed_candidates, _, seed_unclassified,
+                     seed_disabled, _, seed_status, seed_dialog, seed_new_page, seed_validation) = seed_result
+                    seed_trial.to_fp = seed_fp
+                    seed_trial.response_status = seed_status
+                    seed_trial.dialog_message = seed_dialog
+                    seed_trial.opened_new_page = seed_new_page
+                    seed_trial.validation_errors = seed_validation
+                    if seed_fp not in run.states:
+                        run.states[seed_fp] = StateNode(
+                            fingerprint=seed_fp, url_pattern=seed_url_pat, raw_url=seed_url,
+                            title=seed_title, candidates=seed_candidates,
+                            unclassified_interactive=seed_unclassified, disabled_interactive=seed_disabled,
+                        )
+                    seed_fps[seed_url] = seed_fp
+                else:
+                    seed_trial.to_fp = seed_fps[seed_url]
+                seed_node = run.states[seed_trial.to_fp]
+                seed_frame = _Frame(fp=seed_trial.to_fp, path=[seed_trial])
+                seed_frame.order = _order_for(seed_node, max_breadth, run, revisit_history)
+                stack.append(seed_frame)
 
             states_before = len(run.states)
             flows_before = len(run.flows)

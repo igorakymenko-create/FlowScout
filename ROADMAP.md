@@ -4047,3 +4047,110 @@ to abandon the fix, the same way this project already accepts
 All 20 existing tests still pass; both fixture servers and their
 ports confirmed shut down; no leftover Playwright/headless-Chromium
 processes.
+
+## Direct URL seeding -- sitemap.xml and an explicit list (done, Sep 2026)
+
+Next item in the same audit's ordering: the crawler can only ever find
+what it can DFS its way to by clicking from `start_url`. A page with
+no inbound link anywhere in the crawled UI -- a deep-linked SPA route,
+an old promo landing page still live but delisted from navigation --
+is structurally unreachable no matter how thoroughly the rest of the
+app is explored, with no way to tell the crawler "this page exists
+too" short of it happening to be linked from somewhere.
+
+**Design, decided before writing code:** rather than inventing a
+parallel "visit this URL and stop" code path, represent a seed URL as
+a synthetic pseudo-candidate (`{"tag": "direct-nav", "href": url}`)
+that reuses the *exact same* Transition/`_run_path()`/`_run_dfs()`
+machinery every ordinary click already goes through. `perform_action()`
+recognizes the tag and does `page.goto(el_meta["href"])` instead of
+locating and clicking a DOM element; everything downstream (state
+discovery, fingerprinting, risk display, replay, resume) needed zero
+special-casing because a seed URL's arrival is just an ordinary
+1-step Transition like any other, with an empty `from_fp` being the
+only tell that it didn't come from clicking anywhere already known.
+This means a seed URL is genuinely explored, not just visited: the
+crawler clicks around from wherever it lands, exactly like it does
+from `start_url` itself.
+
+**Built:**
+
+- `actions.py`: `perform_action()` gains a `tag == "direct-nav"`
+  branch, before `build_locator()` ever runs (there's no DOM element
+  to locate). Reuses the same nav-status/dialog/new-page capture as an
+  ordinary click -- a direct `page.goto()` can land on a 404, trigger
+  a `beforeunload`, etc., same as any navigation. `describe_action()`
+  gains a matching branch (`Open URL directly: "<path>"`).
+- `crawler.py`: `_fetch_sitemap_urls()` (stdlib `urllib.request` +
+  `xml.etree.ElementTree`, matching this project's existing
+  no-new-HTTP-dependency convention from embeddings.py) fetches and
+  parses either a plain `<urlset>` or a `<sitemapindex>` of child
+  sitemaps, recursed up to 2 levels. `_resolve_seed_urls()` merges
+  `config["seed_urls"]` (explicit) with whatever the sitemap yielded,
+  then filters exactly like an ordinary candidate href already is (see
+  risk.classify): dropped if its domain isn't in `allowed_domains`,
+  dropped if its path matches an `exclude_patterns` glob, dropped if
+  it's just `start_url` itself (nothing new to seed there). Capped at
+  `config.get("max_seed_urls", 50)` -- a real sitemap can list
+  thousands of URLs, and each seed's own exploration costs the same as
+  crawling an entire extra site, so raising the cap is a deliberate
+  operator choice, not an accident. A fetch/parse failure is recorded
+  as a checkpoint, not raised -- seeding is additive to an otherwise-
+  normal crawl, so one broken sitemap shouldn't sink the whole run.
+- `crawl()`: one additional root-like `_Frame` per resolved seed URL,
+  pushed onto the same DFS stack as `root_frame` -- each starts its
+  own full exploration from wherever that URL lands. Discovered once
+  (by the first persona) and reused by every later one, same
+  "provably persona-independent" reasoning `root_fp` itself already
+  relies on: a direct-nav transition ignores `credentials` entirely,
+  so what a seed URL shows depends only on the URL, never on which
+  persona is walking.
+- `report.py`: a seed transition's `from_fp` is `""` -- no state to
+  look up, by design, since it's an additional entry point rather than
+  something reached by clicking from anywhere already discovered. A
+  bare "?" would read as a bug; special-cased to show
+  "(direct navigation)" instead.
+- Web UI (`index.html`): a new "Direct URL seeding" section (Sitemap
+  URL + Additional seed URLs fields), wired into the same load/reset/
+  collect functions every other config field already goes through, plus
+  a matching help-overlay entry -- kept in sync with the JSON schema
+  the same way `allowed_domains`/`exclude_patterns` already are.
+
+**Verified live, through the full real `crawl()` pipeline AND the
+actual HTTP API (not just the Python function directly):** a fixture
+site whose home page links to `/linked` only -- `/hidden` and its own
+child `/hidden-child` have no inbound link anywhere, reachable only
+via a `sitemap_index.xml` that recurses into `sitemap1.xml`, which
+also lists `/excluded` (to prove exclude_patterns filtering) and an
+external-domain URL (to prove domain filtering):
+
+```
+States=4 Flows=3 Checkpoints=0
+flow 1: 'Open URL directly: "/hidden"', 'Open "Hidden child"' -> /hidden-child
+flow 2: 'Open URL directly: "/hidden"' -> /hidden
+flow 3: 'Open "Linked page"' -> /linked
+```
+
+`/hidden`/`/hidden-child` correctly discovered and explored, `/excluded`
+correctly never visited, the external URL correctly dropped, `/`
+correctly deduped against `start_url` itself (no redundant "Open URL
+directly" flow for the crawl's own home page). Separately verified:
+`max_seed_urls` caps `_resolve_seed_urls()`'s own output exactly as
+configured; an unreachable `sitemap_url` degrades to a single
+checkpoint with the crawl still completing normally, not an exception;
+and the identical config posted through the real running server's
+`/api/runs` endpoint (not called as a Python function) produced the
+same `States=4 Flows=3`, with the rendered HTML report showing both
+the "Open URL directly" label and the "(direct navigation)" origin
+note.
+
+Regression check: a full saucedemo.com crawl (a config with neither
+`seed_urls` nor `sitemap_url` at all) is byte-for-byte unchanged in
+shape from the pre-feature baseline -- `_resolve_seed_urls()` returns
+an empty list and the per-persona seeding loop is a no-op, exactly as
+it was before this existed.
+
+All 20 existing tests still pass; the fixture server and its port
+confirmed shut down; the test run created through the live HTTP API
+removed from `runs/`; no leftover Playwright/headless-Chromium
+processes.

@@ -29,7 +29,18 @@ def _flow_steps_html(flow, states: dict) -> str:
     for i, t in enumerate(flow.transitions):
         risk_label, risk_class = _RISK_META[t.risk]
         from_state = states.get(t.from_fp)
-        page = _esc(human_page_label(from_state.url_pattern)) if from_state else "?"
+        if from_state:
+            page = _esc(human_page_label(from_state.url_pattern))
+        elif not t.from_fp:
+            # from_fp == "" only for a direct-nav seed transition
+            # (crawler.py's seed_urls/sitemap_url handling) -- there IS
+            # no "page this started from", by design: it's an
+            # additional entry point, not something reached by clicking
+            # from anywhere already discovered. A bare "?" here would
+            # look like a bug; name what it actually is instead.
+            page = "(direct navigation)"
+        else:
+            page = "?"
         outcome_note = ""
         if t.outcome == "revisit":
             to_state = states.get(t.to_fp)

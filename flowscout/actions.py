@@ -670,6 +670,8 @@ def describe_action(el_meta: dict, fill_summary: dict | None) -> str:
     button being pressed, or a form being submitted. Name the verb, and
     for form submissions, name what was actually filled in (masking
     passwords) so e.g. login steps show which account was used."""
+    if el_meta.get("tag") == "direct-nav":
+        return f'Open URL directly: "{el_meta.get("text") or el_meta["href"]}"'
     text = el_meta.get("text") or el_meta.get("dataTest") or el_meta.get("id") or el_meta.get("tag", "element")
     if fill_summary is not None:
         if fill_summary:
@@ -1524,6 +1526,26 @@ def perform_action(page, el_meta: dict, credentials: dict, timeout_ms: int = 800
     limits.get("action_timeout_ms", 8000), so a config can raise it for
     a known-slow site without patching code; 8000 stays the default,
     identical to every crawl run before this existed."""
+    # tag == "direct-nav" (Sep 2026): a synthetic pseudo-candidate built
+    # by crawler.py from a config's seed_urls/sitemap_url, not something
+    # discovered on any page -- there's no DOM element to locate at all,
+    # so this branches before build_locator() ever runs. Reuses the same
+    # nav-status/dialog/new-page observation as an ordinary click,
+    # since a direct page.goto() can trigger all three (a redirect
+    # chain landing on a 404, a beforeunload dialog, none of these are
+    # click-specific).
+    if el_meta.get("tag") == "direct-nav":
+        holder, remove = _capture_nav_status(page)
+        dlg_holder, dlg_remove = _capture_dialog(page)
+        page_holder, page_remove = _capture_new_page(page)
+        try:
+            page.goto(el_meta["href"], wait_until="load", timeout=timeout_ms)
+            _settle(page)
+        finally:
+            remove()
+            dlg_remove()
+            page_remove()
+        return None, {}, holder["status"], "; ".join(dlg_holder["messages"]), page_holder["url"]
     loc = build_locator(page, el_meta)
     # Bounded occlusion recheck (Aug 2026), same grace period for both
     # branches below -- see _wait_until_unoccluded's own docstring for
