@@ -167,6 +167,25 @@ class Transition:
     # from a genuinely inert click just because the ORIGINAL page's
     # own fingerprint never changed.
     opened_new_page: Optional[str] = None
+    # "" if the page shows no validation-error signal after this action,
+    # otherwise each one joined by "; " -- see actions.py's _DISCOVER_JS
+    # ("validationSignals") for exactly what's detected: [aria-invalid=
+    # "true"] fields, non-empty [role="alert"]/aria-live regions, and
+    # native HTML5 constraint failures via :user-invalid (deliberately
+    # NOT plain :invalid, which flags an empty `required` field from the
+    # very first page load, before any submit attempt -- verified live:
+    # :invalid stayed at the same nonzero count before AND after
+    # submitting, pure noise, while :user-invalid only ever went from 0
+    # to nonzero after a real submit attempt). Fed into state_fingerprint()
+    # (crawler.py's _discover_state()) alongside the ordinary candidate
+    # signatures -- without this, a validation-error state and its
+    # pre-submit state are IDENTICAL by url+candidate-set (same fields,
+    # same submit button, same URL), so the crawler read a rejected
+    # submission as a plain revisit and never explored past it: an
+    # entire class of negative scenarios (bad input, duplicate values,
+    # required-field misses) was structurally invisible, not merely
+    # deprioritized.
+    validation_errors: str = ""
 
 
 @dataclass

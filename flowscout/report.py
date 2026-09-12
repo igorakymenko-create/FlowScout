@@ -72,6 +72,18 @@ def _flow_steps_html(flow, states: dict) -> str:
                 f' <span class="step-note">→ opened a new tab: {_esc(t.opened_new_page)} '
                 f'(not explored -- crawler stays on this page)</span>'
             )
+        # validation_errors (Sep 2026) differs from the visibility-only
+        # signals above: it's also folded into state_fingerprint() itself
+        # (see crawler.py's _discover_state()), so a rejected submission
+        # genuinely becomes its own explorable state instead of an
+        # indistinguishable revisit. Styled as an error note (not a plain
+        # one) since surfacing exactly this -- what the app does with bad
+        # input -- is the whole point of a QA tool, not an incidental fact.
+        if t.validation_errors:
+            outcome_note += (
+                f' <span class="step-note step-error">→ validation error: '
+                f'{_esc(t.validation_errors)}</span>'
+            )
         parts.append(
             f'<li class="step"><span class="step-idx">{i + 1}</span>'
             f'<span class="step-page">{page}</span>'

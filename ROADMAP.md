@@ -3927,3 +3927,123 @@ loop adds no observable regression to ordinary single-frame crawls.
 All 20 existing tests still pass; both fixture servers and their
 ports confirmed shut down; no leftover Playwright/headless-Chromium
 processes.
+
+## State fingerprint was blind to validation errors (done, Sep 2026)
+
+The last item flagged in the same audit that produced the three fixes
+above, and arguably the most consequential: `state_fingerprint()` is
+built purely from `(url_pattern, sorted candidate signatures)` -- it
+never looks at page TEXT. Rejecting an invalid form submission
+typically keeps the same URL and the same field/submit-button set (the
+form is still there, still fillable), so the resulting error state
+fingerprints byte-for-byte IDENTICALLY to the pre-submit state. The
+crawler read this as an ordinary "revisit" and `_run_dfs`'s main loop
+never pushes a new frame to explore past a revisit (see its own
+comment at `if new_fp in run.states:`) -- so an entire class of
+negative scenarios (bad input, duplicate values, required-field
+misses, wrong credentials) was structurally invisible to the crawler,
+not merely deprioritized like everything else this audit found.
+
+**Investigated before writing anything, since the obvious first idea
+turned out to be wrong:** planned to detect invalid fields via CSS
+`:invalid`, then checked it live first. `:invalid` matches an empty
+`required` field from the very first page load, before any submit
+attempt ever happens -- confirmed live: count stayed at the same
+nonzero value both before AND after clicking submit, pure noise, never
+actually discriminating "rejected" from "merely untouched". The
+`:user-invalid` pseudo-class (Chromium 119+, bundled Playwright
+Chromium supports it) is the real discriminator -- verified live on
+the same fixture: 0 matches on fresh load, 1 match only after a
+genuine submit attempt. Also verified the complementary path: a form
+with no native HTML5 constraints at all, whose OWN JavaScript sets
+`aria-invalid="true"` and a `role="alert"` banner after a failed
+client-side check -- both went from absent to present only after the
+actual submit click, never before.
+
+**Built:**
+
+- `_DISCOVER_JS` (`actions.py`): new `validationSignals` gathering,
+  added to the same per-frame payload already produced for candidate
+  discovery (so it's picked up inside iframes/shadow roots too, for
+  free, via the existing `queryAllDeep`/per-frame loop above) --
+  `invalid-field:<name>` for every `[aria-invalid="true"]` element,
+  `alert:<text>` for every non-empty `[role="alert"]` region (via the
+  existing `firstBlockText` helper), `native-invalid:<name>:<message>`
+  for every `:user-invalid` element (guarded in a try/catch, since
+  pseudo-class support can't be assumed forever) -- deliberately NOT
+  plain `:invalid`, for the reason above.
+- `discover_candidates()` (`actions.py`): now returns a 5th element,
+  `validation_signals` (merged across every frame, each non-main one
+  prefixed with its `frameUrl`).
+- `_discover_state()` (`crawler.py`): feeds `validation_signals`
+  straight into `state_fingerprint()` alongside the ordinary candidate
+  signatures -- the actual fix. A rejected submission now genuinely
+  becomes its own state.
+- `Transition.validation_errors: str` (`models.py`): the joined
+  signal string observed after the action, threaded through
+  `_run_path()`'s return tuple (11 -> 12 elements) and all three call
+  sites (main DFS loop, `crawl()`'s root discovery, `explore_combination()`),
+  the same mechanical pattern already used for
+  `response_status`/`dialog_message`/`opened_new_page`. Unlike those
+  three, this one isn't purely observational -- it also changes the
+  fingerprint, so it gets its own paragraph in `_run_path()`'s
+  docstring saying so.
+- `report.py`: a new step note, styled as an error (not a plain note
+  like `dialog_message`/`opened_new_page`) since surfacing exactly
+  this -- what the app does with bad input -- is the whole point of a
+  QA tool, not an incidental fact.
+
+**Verified live, through the full real `crawl()` pipeline, twice:**
+
+A fixture with an ordinary link plus a form whose own JS validation
+requires a "promo code" field to be digits-only -- the crawler's
+generic auto-fill value (`"flowscout_test"`, not digits) fails that
+check every real time, so this happens on every single run, not by
+chance:
+
+```
+States=3 Flows=4 Checkpoints=0
+flow 1 (unique): 'Open "Ordinary link"' -> /ordinary
+flow 4 (unique): 'Fill form and submit "Apply promo" (promo_code="flowscout_test")' -> /
+    validation_errors: 'invalid-field:promo_code; alert:Promo code must be digits only'
+flow 3 (duplicate): [submit, submit] -> /
+    validation_errors: ... (both steps)
+flow 2 (duplicate): [submit, "Open Ordinary link"] -> /ordinary
+```
+
+Three distinct fingerprints (root / error-state / `/ordinary`), not
+two -- before this fix, "Apply promo" would have fingerprinted
+identically to the root and ended the branch immediately as a
+revisit. Instead the crawler correctly kept exploring FROM the error
+state: submitting again, and successfully following the ordinary link
+away from it, exactly like it would from any other real state.
+
+Second, against a real production site, not a fixture: submitted
+saucedemo.com's own login form with a wrong password.
+`discover_candidates()`'s `validation_signals` came back
+`['alert:Epic sadface: Username and password do not match any user in']`
+-- saucedemo's real error banner (`<h3 data-test="error" role="alert">`)
+matched the `role="alert"` signal directly, no fixture involved. The
+canonical "wrong credentials" negative test case, previously invisible
+to the crawler for exactly the reason above.
+
+Regression check: a full saucedemo.com crawl with a *correct* login --
+`States=9 Flows=20`, identical shape to the pre-fix baseline, same
+single `max_flows` checkpoint. No aria-invalid/role=alert/native-invalid
+elements appear anywhere in that flow, so `validation_signals` is
+empty at every state and the fingerprint is completely unaffected --
+confirming the fix is additive, not a behavior change for sites
+without validation errors.
+
+**Disclosed limitation, not fixed in this pass:** a site with a
+persistent, unrelated `role="alert"` region always present regardless
+of any action (a rotating ad banner, say) would fold its own changing
+text into every state's fingerprint and could cause spurious
+duplicate states. Not observed on any real site tested against so
+far; considered an acceptable, documented trade-off rather than reason
+to abandon the fix, the same way this project already accepts
+`_norm_token`'s coarser tradeoffs elsewhere.
+
+All 20 existing tests still pass; both fixture servers and their
+ports confirmed shut down; no leftover Playwright/headless-Chromium
+processes.

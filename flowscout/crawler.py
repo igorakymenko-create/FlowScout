@@ -45,19 +45,26 @@ class _Frame:
 
 
 def _discover_state(page, allowed_domains, run: RunResult
-                     ) -> tuple[str, str, str, list[ElementCandidate], list[dict], list[dict]]:
+                     ) -> tuple[str, str, str, list[ElementCandidate], list[dict], list[dict], list[str]]:
     url_pattern = normalize_url(page.url)
     title = page.title()
     domain = current_domain(page.url)
     exclude_patterns = run.config.get("exclude_patterns", [])
-    candidates, occluded, unclassified, disabled = discover_candidates(
+    candidates, occluded, unclassified, disabled, validation_signals = discover_candidates(
         page, domain, allowed_domains, exclude_patterns)
-    fp = state_fingerprint(url_pattern, [c.signature for c in candidates])
+    # validation_signals folded into the fingerprint itself (not just
+    # reported afterward, like dialog_message/response_status are) --
+    # see actions.py's discover_candidates docstring and Transition.
+    # validation_errors for why: without this, a rejected-submission
+    # state is byte-for-byte identical (by url+candidate-set) to its own
+    # pre-submit state, so the crawler read it as a plain revisit and
+    # never explored past it.
+    fp = state_fingerprint(url_pattern, [c.signature for c in candidates] + validation_signals)
     for o in occluded:
         run.skipped_candidates.append({
             "state_fp": fp, "label": o["label"], "reason": o["reason"], "risk": "n/a",
         })
-    return fp, url_pattern, title, candidates, unclassified, disabled
+    return fp, url_pattern, title, candidates, unclassified, disabled, validation_signals
 
 
 def _run_path(browser, config, path: list[Transition], run: RunResult, credentials: dict):
@@ -65,9 +72,16 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
     cookies/localStorage -- no leakage between DFS branches). Returns
     (fp, url_pattern, title, candidates, last_fill_summary, unclassified,
     disabled, last_choice_state, last_response_status,
-    last_dialog_message, last_opened_new_page) for the state reached
-    after the last step, or None if some step failed (an error
-    checkpoint is recorded, pointing at which step). `last_fill_summary`
+    last_dialog_message, last_opened_new_page, validation_errors) for
+    the state reached after the last step, or None if some step failed
+    (an error checkpoint is recorded, pointing at which step).
+    `validation_errors` is the joined validation-error signal string
+    for the state reached after the LAST step (see _discover_state/
+    Transition.validation_errors) -- unlike the other `last_*` fields
+    below, it describes the state itself, not the action that produced
+    it, so it isn't specific to "the final step of `path`" in the same
+    way; it's simply whatever _discover_state() found there.
+    `last_fill_summary`
     is whatever perform_action returned for the *final* step of `path`
     -- None if that step wasn't a form submission, else the field:value
     summary used to build a readable "Fill form and submit ... (...)"
@@ -120,10 +134,12 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
                     detail=str(exc)[:1200],
                 ))
                 return None
-        fp, url_pattern, title, candidates, unclassified, disabled = _discover_state(
+        fp, url_pattern, title, candidates, unclassified, disabled, validation_signals = _discover_state(
             page, config["allowed_domains"], run)
+        validation_errors = "; ".join(validation_signals)
         return (fp, url_pattern, title, candidates, last_fill_summary, unclassified, disabled,
-                last_choice_state, last_response_status, last_dialog_message, last_opened_new_page)
+                last_choice_state, last_response_status, last_dialog_message, last_opened_new_page,
+                validation_errors)
     finally:
         context.close()
 
@@ -392,7 +408,7 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
             continue
 
         (new_fp, url_pat, title, new_candidates, fill_summary, new_unclassified, new_disabled,
-         choice_state, response_status, dialog_message, opened_new_page) = result
+         choice_state, response_status, dialog_message, opened_new_page, validation_errors) = result
         # choice_state (radio/checkbox selections observed at submit time) is
         # merged into the label for human/gap-analysis visibility only -- it
         # must never reach trial.form_fields, since M4's codegen turns that
@@ -406,6 +422,7 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
         trial.response_status = response_status
         trial.dialog_message = dialog_message
         trial.opened_new_page = opened_new_page
+        trial.validation_errors = validation_errors
         new_path = frame.path + [trial]
 
         if new_fp in run.states:
@@ -529,7 +546,7 @@ def crawl(config: dict) -> RunResult:
                     browser.close()
                     return run
                 (root_fp, root_url_pat, root_title, root_candidates, _, root_unclassified,
-                 root_disabled, _, _, _, _) = root
+                 root_disabled, _, _, _, _, _) = root
                 run.states[root_fp] = StateNode(
                     fingerprint=root_fp, url_pattern=root_url_pat, raw_url=config["start_url"],
                     title=root_title, candidates=root_candidates,
@@ -809,7 +826,7 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
                 raise RuntimeError("the combination failed to apply -- see this run's checkpoints "
                                     "for which step and why")
             (new_fp, url_pat, title, new_candidates, fill_summary, new_unclassified, new_disabled,
-             choice_state, response_status, dialog_message, opened_new_page) = result
+             choice_state, response_status, dialog_message, opened_new_page, validation_errors) = result
 
             last = combo_path[-1]
             label_fields = {**(fill_summary or {}), **(choice_state or {})}
@@ -820,6 +837,7 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
             last.response_status = response_status
             last.dialog_message = dialog_message
             last.opened_new_page = opened_new_page
+            last.validation_errors = validation_errors
 
             combo_note = "Set via a user-specified parameter combination"
             if new_fp in run.states:

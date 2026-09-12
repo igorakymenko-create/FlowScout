@@ -582,7 +582,43 @@ _DISCOVER_JS = r"""
         });
     }
 
-    return {candidates, pool, legacyUnclassified, selects, radios, checkboxes, roleControls};
+    // Validation-error visibility (Sep 2026): state_fingerprint() is
+    // built from (url pattern, candidate signatures) alone -- blind to
+    // page TEXT entirely. Rejecting an invalid form submission typically
+    // keeps the same URL and the same field/submit-button set, so the
+    // error state fingerprints IDENTICALLY to the pre-submit state and
+    // the crawler read it as a plain revisit, never exploring further --
+    // an entire class of negative scenarios (bad input, duplicate
+    // values, required-field misses) was structurally invisible, not
+    // merely deprioritized. Detected via standards-based signals only,
+    // never a guessed framework-specific CSS class name:
+    const validationSignals = [];
+    for (const el of queryAllDeep(document, '[aria-invalid="true"]')) {
+        const name = el.getAttribute('name') || el.id || el.getAttribute('aria-label')
+            || el.getAttribute('placeholder') || el.tagName;
+        validationSignals.push('invalid-field:' + name);
+    }
+    for (const el of queryAllDeep(document, '[role="alert"]')) {
+        const msg = firstBlockText(el.innerText || '');
+        if (msg) validationSignals.push('alert:' + msg);
+    }
+    // :user-invalid (NOT plain :invalid) -- verified live: :invalid
+    // matches an empty `required` field from the very first page load,
+    // before any submit attempt ever happens, so it never actually
+    // distinguishes "rejected" from "untouched" and would just be
+    // constant noise in the fingerprint. :user-invalid only matches
+    // once the field has genuinely been interacted with/submitted,
+    // which is exactly the discriminator needed here. Guarded in a
+    // try/catch since pseudo-class support can't be assumed forever.
+    try {
+        for (const el of queryAllDeep(document, ':user-invalid')) {
+            const name = el.getAttribute('name') || el.id || el.tagName;
+            const msg = (el.validationMessage || '').trim().slice(0, 60);
+            validationSignals.push('native-invalid:' + name + (msg ? ':' + msg : ''));
+        }
+    } catch (e) { /* :user-invalid unsupported -- aria-invalid/role=alert above still apply */ }
+
+    return {candidates, pool, legacyUnclassified, selects, radios, checkboxes, roleControls, validationSignals};
 }
 """
 
@@ -973,8 +1009,8 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
 
 def discover_candidates(page, current_domain: str, allowed_domains: list[str],
                          exclude_patterns: list[str] | None = None
-                         ) -> tuple[list[ElementCandidate], list[dict], list[dict], list[dict]]:
-    """Returns (candidates, occluded, unclassified, disabled).
+                         ) -> tuple[list[ElementCandidate], list[dict], list[dict], list[dict], list[str]]:
+    """Returns (candidates, occluded, unclassified, disabled, validation_signals).
 
     occluded: on-screen and otherwise valid candidates currently covered
     by something else (an open menu panel, a modal) per the browser's own
@@ -995,6 +1031,14 @@ def discover_candidates(page, current_domain: str, allowed_domains: list[str],
     or pointer-events:none) -- correctly never clicked, surfaced anyway
     since "this control exists but isn't available right now" is a real
     finding (e.g. a wizard option gated behind an earlier choice).
+
+    validation_signals: normalized strings describing any validation-error
+    indicator currently visible on the page (aria-invalid fields, non-empty
+    role="alert" regions, native :user-invalid constraint failures) --
+    see _DISCOVER_JS's own comment for why :user-invalid and not plain
+    :invalid. Fed into state_fingerprint() by the caller so a rejected-
+    submission state fingerprints differently from its pre-submit state,
+    instead of reading as an indistinguishable revisit.
 
     Runs across every frame in the page (`page.frames`), not just the
     main one (Aug 2026) -- a same- or cross-origin <iframe>'s own
@@ -1018,6 +1062,7 @@ def discover_candidates(page, current_domain: str, allowed_domains: list[str],
     formal: list[tuple[dict, str, bool]] = []
     pool: list[dict] = []
     legacy_unclassified_raw: list[dict] = []
+    validation_signals: list[str] = []
     for frame in page.frames:
         try:
             payload = frame.evaluate(_DISCOVER_JS)
@@ -1030,6 +1075,11 @@ def discover_candidates(page, current_domain: str, allowed_domains: list[str],
                 if frame_url:
                     el["frameUrl"] = frame_url
                 formal.append((el, "markup", False))
+        # Gathered from every frame, not just main -- an error banner or
+        # invalid field inside an iframe (a payment widget, say) is a
+        # real validation-error state too.
+        for sig in payload.get("validationSignals", []):
+            validation_signals.append(f"{frame_url}:{sig}" if frame_url else sig)
         if is_main:
             pool = payload["pool"]
             legacy_unclassified_raw = payload.get("legacyUnclassified", [])
@@ -1076,7 +1126,7 @@ def discover_candidates(page, current_domain: str, allowed_domains: list[str],
     via_order = {"handler": 0, "markup": 1}
     candidates.sort(key=lambda c: (order[c.risk], via_order.get(c.discovered_via, 1)))
     disabled = _aggregate_unclassified(disabled_raw)
-    return candidates, occluded, unclassified, disabled
+    return candidates, occluded, unclassified, disabled, validation_signals
 
 
 def build_locator(page, el_meta: dict):
