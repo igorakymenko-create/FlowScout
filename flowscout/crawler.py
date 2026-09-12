@@ -553,7 +553,8 @@ def crawl(config: dict) -> RunResult:
     return run
 
 
-def resume_flow(run: RunResult, flow: Flow, limit_overrides: dict, credentials: dict) -> None:
+def resume_flow(run: RunResult, flow: Flow, limit_overrides: dict, credentials: dict,
+                 run_semantic_dedup: bool = True) -> None:
     """Continue exploring from where one specific BLOCKED flow left off,
     instead of re-crawling the whole config from start_url. Mutates
     `run` in place -- new states/flows/checkpoints/skipped_candidates
@@ -566,6 +567,17 @@ def resume_flow(run: RunResult, flow: Flow, limit_overrides: dict, credentials: 
     THIS flow's own path). max_states/max_flows truncation isn't tied to
     any one flow, so there's nothing here to resume for those -- the
     honest fix is a full re-crawl with a higher limit.
+
+    `run_semantic_dedup` (Aug 2026): set False by resume_all_blocked_in_run's
+    own batch loop -- semantic dedup re-embeds EVERY currently-unique
+    flow from scratch on each call (see semantic_dedup.py, no caching
+    across calls), so resuming 12 flows in a row with this left True
+    would redundantly re-embed an ever-growing flow list up to 12 times
+    in a row for one button click, wasting most of the free-tier
+    embeddings quota on repeat work before ever reaching real analysis.
+    Single-flow resume (the individual "Resume this flow" button) keeps
+    the default True -- there's exactly one call there, nothing to
+    batch up.
 
     `limit_overrides`: a partial `limits` dict (e.g. just
     `{"max_depth": 12}`) merged over the run's own original limits, plus
@@ -621,7 +633,7 @@ def resume_flow(run: RunResult, flow: Flow, limit_overrides: dict, credentials: 
             browser.close()
 
     sem_cfg = run.config.get("semantic_dedup", {})
-    if sem_cfg.get("enabled", True):
+    if run_semantic_dedup and sem_cfg.get("enabled", True):
         try:
             apply_semantic_dedup(run, threshold=sem_cfg.get("threshold", DEFAULT_THRESHOLD))
         except Exception as exc:  # never let a dedup-pass bug take down an otherwise-successful resume

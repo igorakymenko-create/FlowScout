@@ -3513,3 +3513,60 @@ single-flow `resume_flow_in_run()` too: `delta = {'new_flows': 2,
 All 20 existing tests still pass; fixture server and scratch run
 directories cleaned up; the user's own real run on disk was read for
 investigation but never written to; no leftover Playwright processes.
+
+
+## Resume-all was re-embedding the whole flow list once per resumed flow (done, Aug 2026)
+
+Follow-up report: hit Gemini's free-tier quota again, and separately
+still saw "12 blocked flows" after a resume-all with no visible
+change. Investigated the user's OWN real run on disk again rather than
+assuming the previous fix hadn't worked. It had: the server log showed
+a clean `200 OK`, `flows.json` carried the same shape as the earlier
+verified case (98 new flows, 11 newly unique, all 98 correctly tagged
+with `origin_note`), and `report.html` on disk genuinely contained the
+badge markup and the delta-summary JS. **The resume itself worked --
+the "still 12 blocked" perception was the same by-design behavior
+already explained (the original 12 never change; the "Resume all" box
+always shows the current resumable count) meeting a fresh reminder of
+the quota problem, not a new bug in the resume logic.**
+
+**The actual new finding, in `semantic_dedup_status` itself:** `"error
+after partial run: ... limit: 1000 ... Please retry in 59.79s"` -- a
+**different** quota metric than the last hit (100/minute): this is the
+free tier's **1000-requests-per-DAY** ceiling, confirming genuinely
+avoidable waste, not just heavy usage. Root cause, found by reading
+`crawler.py` again: `resume_flow()` calls `apply_semantic_dedup()`
+**unconditionally** at its own end -- and semantic dedup re-embeds
+EVERY currently-unique flow in the run from scratch every time it
+runs (no caching across calls). `resume_all_blocked_in_run()`'s loop
+calls `resume_flow()` once per blocked flow -- 12 times for the user's
+own batch -- so ONE click on "Resume all" silently re-embedded an
+ever-growing unique-flow list up to 12 TIMES over, burning daily quota
+on repeat work before the batch was even half done.
+
+**Fixed:** `crawler.py`'s `resume_flow()` gained
+`run_semantic_dedup: bool = True` -- `resume_all_blocked_in_run()`
+now passes `False` for every per-flow call inside its loop, then runs
+`apply_semantic_dedup()` itself exactly ONCE after the whole batch
+completes (same non-fatal try/except as before: a 429 here still
+can't take down an otherwise-successful batch). The single-flow
+"Resume this flow" button is untouched -- it only ever makes one call,
+so there was nothing to batch there in the first place.
+
+**Verified live, actual call counts, not just "it should work":**
+patched `apply_semantic_dedup` with a counting wrapper across
+`crawler.py` and `web/runs.py`'s own imported references (both modules
+bind the name at import time, so both needed patching to actually
+intercept every call site). On the same 3-branch fixture used to
+verify the earlier delta/badge fix: **resuming all 3 blocked flows now
+calls `apply_semantic_dedup` exactly once** (confirmed to have been 3
+before this fix, one per resumed flow). Single-flow
+`resume_flow_in_run()` checked separately: still exactly 1 call,
+unchanged. All 20 existing tests still pass; fixture server and
+scratch run directories cleaned up; no leftover Playwright processes.
+
+For the user's own 12-flow case, this turns 12 redundant re-embeddings
+of an ever-growing flow list into 1 -- a meaningful cut to how fast one
+"Resume all" click can burn through the free tier's daily allowance,
+though not a substitute for raising the tier or reducing how often
+dedup needs to run at all if usage keeps growing.

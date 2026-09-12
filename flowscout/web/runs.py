@@ -25,6 +25,7 @@ from ..crawler import crawl, explore_combination, resume_flow
 from ..gap_analysis import DEFAULT_THRESHOLD, analyze_gaps
 from ..models import ChangeEvent, ChangeReport, GapAnalysis, RunResult
 from ..report import render_html
+from ..semantic_dedup import DEFAULT_THRESHOLD as SEMANTIC_DEDUP_THRESHOLD, apply_semantic_dedup
 from ..tcms import TcmsItem, load_tcms_csv
 
 RUNS_DIR = Path("runs")
@@ -405,7 +406,17 @@ def resume_all_blocked_in_run(run_id: str, depth_increment: int = 5,
             limit_overrides["allow_mutating"] = allow_mutating
         credentials = _credentials_for_persona(run.config, flow.persona)
         try:
-            resume_flow(run, flow, limit_overrides, credentials)
+            # run_semantic_dedup=False: semantic dedup re-embeds EVERY
+            # currently-unique flow from scratch on each call (see
+            # semantic_dedup.py) -- doing that after each of N resumes
+            # in this loop would redundantly re-embed an ever-growing
+            # flow list up to N times for one click. Run it ONCE, after
+            # the whole batch, instead -- found directly from a live
+            # report: a 12-flow "Resume all" hit Gemini's free-tier
+            # DAILY quota (not just the per-minute one from before),
+            # and this loop's own repeat-embedding was a real, avoidable
+            # contributor to that, not just normal usage.
+            resume_flow(run, flow, limit_overrides, credentials, run_semantic_dedup=False)
             results.append({"flow_id": flow.id, "status": "ok"})
         except Exception as exc:
             # One flow failing to resume (a genuine site error, not a
@@ -416,6 +427,14 @@ def resume_all_blocked_in_run(run_id: str, depth_increment: int = 5,
         # Written after EACH flow, not only once at the end -- so a
         # crash or timeout partway through a large batch doesn't lose
         # whatever earlier flows in it already succeeded.
+        flows_path.write_text(json.dumps(run.to_json(), indent=2), encoding="utf-8")
+
+    sem_cfg = run.config.get("semantic_dedup", {})
+    if sem_cfg.get("enabled", True):
+        try:
+            apply_semantic_dedup(run, threshold=sem_cfg.get("threshold", SEMANTIC_DEDUP_THRESHOLD))
+        except Exception as exc:  # never let a dedup-pass bug take down an otherwise-successful batch
+            run.semantic_dedup_status = f"error on resume-all: {exc}"
         flows_path.write_text(json.dumps(run.to_json(), indent=2), encoding="utf-8")
 
     gap: Optional[GapAnalysis] = None
