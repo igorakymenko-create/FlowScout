@@ -3287,3 +3287,67 @@ shape.
 
 All 20 existing tests still pass; no leftover Playwright processes
 after any of the live verification runs.
+
+
+## "Resume all blocked flows" (done, Aug 2026)
+
+Asked directly: how many blocked flows can be resumed at once, and can
+one button resume all of them instead of clicking "Resume this flow"
+per flow? The honest answer to the first half mattered before building
+the second: `resume_flow()` reads, mutates and writes back the SAME
+`run.states`/`run.flows` graph and the SAME on-disk `flows.json` --
+running two resumes concurrently against the same run would race and
+silently clobber whichever one wrote last. There is no "N at once" for
+a single run; correctness requires exactly one at a time. That's
+exactly what a "resume all" button can automate, though -- doing the
+same sequential clicking a human would, just without the clicking.
+
+**Built**: `web/runs.py`'s new `resume_all_blocked_in_run(run_id,
+depth_increment=5, allow_mutating=None)` -- snapshots which flows are
+`resumable` *before* starting (deliberately doesn't chase newly-
+discovered blocked flows a resume in this same batch might itself
+produce, e.g. hitting a new truncation one level deeper -- bounded,
+predictable work per click; a second click picks up whatever's new
+afterward), then calls `crawler.resume_flow()` once per flow,
+strictly sequentially, writing `flows.json` back after EACH one (so a
+crash partway through doesn't lose earlier progress). `depth_increment`
+is added to **each flow's own current depth**
+(`len(flow.transitions) + depth_increment`), not one flat `max_depth`
+shared by every flow -- chosen explicitly over a single shared number,
+since resumable flows commonly sit at very different depths and one
+number could easily do nothing for whichever ones it doesn't exceed.
+`allow_mutating`, when given, is the one setting applied uniformly
+across the whole batch -- covers the other real resumable reason (a
+risk-policy dead end, not depth truncation) that raising depth alone
+never fixes. New `POST /api/runs/{run_id}/resume-all` mirrors the
+existing per-flow endpoint's shape, returning a per-flow
+`{flow_id, status, detail?}` breakdown alongside the run summary so a
+single genuinely-failed site interaction doesn't read as the whole
+batch silently doing nothing.
+
+`report.py`: new `.resume-all-box`, shown above the Flows list only
+when at least one flow is currently resumable (silently absent
+otherwise, not a permanent fixture) -- flow count, a depth-increment
+field (default 5), an "Allow mutating" checkbox (defaulting to the
+run's own configured value, same convention the per-flow resume box
+already uses), and the button itself. Same elapsed-time-ticker UX
+pattern as the single-flow resume box, adapted to say what's actually
+happening ("processes them one at a time, so it can take a while") and
+to summarize the outcome ("Done — N resumed, M failed") before
+reloading.
+
+**Verified live** on a purpose-built fixture (three independent
+4-page-deep link chains, `max_depth: 2` so each one truncates as its
+own BLOCKED, resumable flow): 3 resumable flows found. Ran
+`resume_all_blocked_in_run` directly against a real `flows.json` on
+disk (not just the crawler primitive) -- all 3 resumed successfully in
+one call (`{'flow_id': 1, 'status': 'ok'}` etc.), states 7 → 10, flows
+6 → 12, `report.html` regenerated with the new box present. Separately
+confirmed *why* new resumable flows appeared afterward wasn't a bug in
+this feature at all: one branch's own action-repeat cap (an unrelated,
+already-existing feature) kicked in one level deeper, purely an
+artifact of this test fixture's own naming scheme (`data-test="a-link-2"`,
+`"a-link-3"`, ... collapsing to a shared normalized signature) --
+confirmed directly before concluding it wasn't this feature's fault,
+not assumed. All 20 existing tests still pass; scratch run directory
+and fixture server cleaned up; no leftover Playwright processes.

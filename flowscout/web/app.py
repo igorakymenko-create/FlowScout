@@ -282,6 +282,33 @@ async def resume_flow(run_id: str, body: dict):
     return {"summary": run.summary()}
 
 
+@app.post("/api/runs/{run_id}/resume-all")
+async def resume_all_endpoint(run_id: str, body: dict):
+    """Resumes EVERY currently-resumable flow in this run, one at a
+    time (see runs_module.resume_all_blocked_in_run's own docstring for
+    why this can't be parallel) -- automates clicking "Resume this
+    flow" once per blocked flow. `body`: {"depth_increment": int,
+    "allow_mutating": bool | null} -- depth_increment (default 5) is
+    added to EACH flow's own current depth, not one shared max_depth;
+    allow_mutating, when given, applies uniformly to every flow in the
+    batch. Response includes a per-flow {flow_id, status, detail?}
+    breakdown alongside the run summary, so a partial failure (one
+    genuinely errored site interaction) doesn't read as the whole
+    batch having silently done nothing."""
+    depth_increment = int(body.get("depth_increment", 5))
+    allow_mutating = body.get("allow_mutating")
+    if allow_mutating is not None:
+        allow_mutating = bool(allow_mutating)
+    try:
+        result = await asyncio.to_thread(
+            runs_module.resume_all_blocked_in_run, run_id, depth_increment, allow_mutating)
+    except FileNotFoundError:
+        raise HTTPException(404, "run not found") from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return {"summary": result["run"].summary(), "results": result["results"]}
+
+
 @app.post("/api/runs/{run_id}/explore-combination")
 async def explore_combination_endpoint(run_id: str, body: dict):
     """Apply several is_choice candidates from one already-known state

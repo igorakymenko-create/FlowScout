@@ -112,6 +112,29 @@ def _flow_card_html(flow, states: dict, show_persona: bool = False,
         </article>"""
 
 
+def _resume_all_box_html(run: RunResult, run_id: str | None) -> str:
+    # Same run_id gate as the per-flow resume box -- a standalone CLI
+    # report has no server to POST this to. Silently empty (not an
+    # "empty" message) when there's nothing resumable, or no server,
+    # rather than a permanent fixture cluttering every report.
+    if not run_id:
+        return ""
+    resumable_count = sum(1 for f in run.flows if f.resumable)
+    if resumable_count == 0:
+        return ""
+    default_allow_mutating = bool(run.config.get("allow_mutating", True))
+    mutating_checked = "checked" if default_allow_mutating else ""
+    plural = "s" if resumable_count != 1 else ""
+    return f"""
+      <div class="resume-all-box">
+        <span>{resumable_count} blocked flow{plural} can be resumed.</span>
+        <label>Depth increment <input type="number" class="resume-all-depth" value="5" min="1" style="width:56px"></label>
+        <label><input type="checkbox" class="resume-all-mutating" {mutating_checked}> Allow mutating</label>
+        <button type="button" onclick="flowscoutResumeAll('{_esc(run_id)}', this)">Resume all blocked flows</button>
+        <span class="resume-all-status"></span>
+      </div>"""
+
+
 def _flows_html(run: RunResult, run_id: str | None = None) -> str:
     # Unique (and blocked -- these need a look too, they're not redundant,
     # they're incomplete) lead the list, fully visible. Duplicates are real
@@ -675,6 +698,48 @@ async function flowscoutExploreCombination(runId, btn) {
     clearInterval(timer);
   }
 }
+
+async function flowscoutResumeAll(runId, btn) {
+  const box = btn.closest('.resume-all-box');
+  const depthIncrement = Number(box.querySelector('.resume-all-depth').value);
+  const allowMutating = box.querySelector('.resume-all-mutating').checked;
+  const statusEl = box.querySelector('.resume-all-status');
+  btn.disabled = true;
+  // Same elapsed-time ticker as the single-flow versions above, more
+  // important here still: this resumes EVERY blocked flow one after
+  // another (has to be sequential -- see resume_all_blocked_in_run's
+  // own docstring), so the total wait is the sum of however many
+  // flows there are, not just one.
+  const startedAt = Date.now();
+  const tick = () => {
+    const secs = Math.round((Date.now() - startedAt) / 1000);
+    statusEl.textContent = `Resuming all blocked flows… (${secs}s elapsed — this processes them one at a time, so it can take a while)`;
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
+  try {
+    const res = await fetch(`/api/runs/${runId}/resume-all`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({depth_increment: depthIncrement, allow_mutating: allowMutating}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      statusEl.textContent = 'Failed: ' + (data.detail || res.statusText);
+      btn.disabled = false;
+      return;
+    }
+    const results = data.results || [];
+    const okCount = results.filter(r => r.status === 'ok').length;
+    const errCount = results.length - okCount;
+    statusEl.textContent = `Done — ${okCount} resumed${errCount ? `, ${errCount} failed` : ''} — reloading…`;
+    window.location.reload();
+  } catch (e) {
+    statusEl.textContent = 'Failed: ' + e;
+    btn.disabled = false;
+  } finally {
+    clearInterval(timer);
+  }
+}
 </script>"""
 
 
@@ -688,6 +753,7 @@ def render_html(run: RunResult, gap: GapAnalysis | None = None, changes: ChangeR
     # than rendered non-functional.
     s = run.summary()
     flows_html = _flows_html(run, run_id)
+    resume_all_html = _resume_all_box_html(run, run_id)
     gap_html = _gap_section_html(gap, run)
     change_html = _change_report_html(changes)
     states_html = _states_html(run)
@@ -800,6 +866,14 @@ h3 {{ font-size: 14.5px; font-weight: 600; margin: 1.5rem 0 .5rem; }}
 .resume-box button:disabled {{ opacity: .6; cursor: default; }}
 .resume-status {{ color: var(--text-tertiary); }}
 
+.resume-all-box {{ margin: 10px 0 16px; padding: 10px 12px; background: var(--accent-soft-bg); border: 1px solid var(--border); border-radius: 8px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }}
+.resume-all-box label {{ display: flex; align-items: center; gap: 4px; color: var(--text-secondary); }}
+.resume-all-box input[type="number"] {{ font: inherit; padding: 2px 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text-primary); }}
+.resume-all-box button {{ font: inherit; padding: 5px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text-primary); cursor: pointer; font-weight: 600; }}
+.resume-all-box button:hover {{ border-color: var(--accent); }}
+.resume-all-box button:disabled {{ opacity: .6; cursor: default; }}
+.resume-all-status {{ color: var(--text-tertiary); }}
+
 .combo-card-title {{ font-size: 14px; font-weight: 600; margin: 0 0 8px; }}
 .combo-box {{ display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; }}
 .combo-group {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 8px; background: var(--surface-alt); border-radius: 6px; }}
@@ -890,6 +964,7 @@ a {{ color: var(--accent); }}
   <h2>Flows</h2>
   <p class="subhead">Every root-to-leaf path the crawler walked, in discovery order. <b style="color:var(--sem-safe)">Unique</b> flows introduce a new sequence of action types; <b style="color:var(--sem-mutating)">duplicates</b> repeat a known sequence — via an identical normalized action sequence, an identical resulting application state reached by a different path (exact, verified — see the note below each card), or high text similarity between different-ending flows (embeddings, lower confidence, worth a second look); <b style="color:var(--sem-destructive)">blocked</b> flows dead-ended because the risk policy withheld the only remaining actions, or an error occurred.</p>
   <p class="subhead">Dedup beyond exact-sequence match: {_esc(run.semantic_dedup_status)}</p>
+  {resume_all_html}
   {flows_html}
   {gap_html}
 

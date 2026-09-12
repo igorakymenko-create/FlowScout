@@ -335,6 +335,81 @@ def resume_flow_in_run(run_id: str, flow_id: int, limit_overrides: dict) -> RunR
     return run
 
 
+def resume_all_blocked_in_run(run_id: str, depth_increment: int = 5,
+                               allow_mutating: Optional[bool] = None) -> dict:
+    """Automates what "Resume this flow" already does, one flow at a
+    time, for EVERY currently-resumable flow in one run, instead of an
+    operator clicking through each one by hand.
+
+    Deliberately sequential, not parallel -- and not just as an
+    implementation shortcut. Every resume reads, mutates and writes
+    back the SAME run.states/run.flows graph and the SAME on-disk
+    flows.json (see resume_flow_in_run above); two of these running at
+    once against the same run would race on that shared state and
+    silently clobber whichever one wrote last. There genuinely is no
+    "resume N at once" for a single run -- correctness requires exactly
+    one at a time, which this just automates rather than working
+    around.
+
+    `depth_increment`: added to EACH flow's own current depth
+    (`len(flow.transitions) + depth_increment`), not one flat
+    `max_depth` applied to every flow -- resumable flows commonly sit
+    at very different depths already, and a single shared number could
+    easily do nothing for whichever ones it doesn't exceed. Mirrors the
+    same `+ 5` default the single-flow "Resume this flow" box already
+    suggests, just computed per flow instead of once.
+
+    `allow_mutating`: applied uniformly to every flow in the batch when
+    given -- covers the OTHER real resumable reason (a dead end from
+    risk-policy/repeat-cap withholding, not depth truncation), which
+    raising depth alone never fixes.
+
+    Takes a snapshot of which flows are resumable BEFORE starting --
+    deliberately does not chase newly-discovered blocked flows a
+    resume in THIS batch might itself produce (e.g. a resumed flow
+    hitting its own new max_depth truncation one level deeper). Bounded,
+    predictable work per click; a second click picks up whatever's
+    newly resumable afterward, with the operator able to see what
+    happened in between rather than an uncontrolled cascade."""
+    out_dir = get_run_dir(run_id)
+    flows_path = out_dir / "flows.json"
+    if not flows_path.exists():
+        raise FileNotFoundError(f"no completed run at {run_id}")
+    run = RunResult.from_json(json.loads(flows_path.read_text(encoding="utf-8")))
+
+    targets = [f for f in run.flows if f.resumable]
+    results: list[dict] = []
+    for flow in targets:
+        limit_overrides: dict = {"max_depth": len(flow.transitions) + depth_increment}
+        if allow_mutating is not None:
+            limit_overrides["allow_mutating"] = allow_mutating
+        credentials = _credentials_for_persona(run.config, flow.persona)
+        try:
+            resume_flow(run, flow, limit_overrides, credentials)
+            results.append({"flow_id": flow.id, "status": "ok"})
+        except Exception as exc:
+            # One flow failing to resume (a genuine site error, not a
+            # bug in this loop) shouldn't lose whatever the rest of the
+            # batch already accomplished -- recorded per-flow instead
+            # of aborting the whole run.
+            results.append({"flow_id": flow.id, "status": "error", "detail": str(exc)[:300]})
+        # Written after EACH flow, not only once at the end -- so a
+        # crash or timeout partway through a large batch doesn't lose
+        # whatever earlier flows in it already succeeded.
+        flows_path.write_text(json.dumps(run.to_json(), indent=2), encoding="utf-8")
+
+    gap: Optional[GapAnalysis] = None
+    gap_path = out_dir / "gap_analysis.json"
+    if gap_path.exists():
+        gap = GapAnalysis.from_json(json.loads(gap_path.read_text(encoding="utf-8")))
+        gap.status += (" (stale: this run was extended by resuming blocked flows since this gap "
+                        "analysis ran -- re-upload the TCMS to refresh it)")
+
+    changes = _load_change_report(out_dir)
+    (out_dir / "report.html").write_text(render_html(run, gap, changes, run_id=run_id), encoding="utf-8")
+    return {"run": run, "results": results}
+
+
 def explore_combination_in_run(run_id: str, state_fp: str, candidate_indices: list[int],
                                 limit_overrides: dict) -> RunResult:
     """Same shape as resume_flow_in_run() (loads from disk, mutates,
