@@ -3351,3 +3351,87 @@ artifact of this test fixture's own naming scheme (`data-test="a-link-2"`,
 confirmed directly before concluding it wasn't this feature's fault,
 not assumed. All 20 existing tests still pass; scratch run directory
 and fixture server cleaned up; no leftover Playwright processes.
+
+
+## Gemini embeddings: batching + retry-on-429 (done, Aug 2026)
+
+Asked directly after hitting Gemini's free-tier quota suspiciously
+fast: `Quota exceeded ... embed_content_free_tier_requests, limit: 100`.
+The number itself (100 requests/minute on the free tier) checked out
+against public docs/community reports -- the real finding was WHY an
+ordinary run got there so quickly, found by reading
+`semantic_dedup.py`/`gap_analysis.py`, not by assuming the limit was
+unusually low: **every embedding comparison in this project issued
+one unbatched HTTP call per text.** `semantic_dedup.py` called
+`embed_text()` once per unique flow; `gap_analysis.py` called it once
+per skipped-candidate, per error, per discovered-but-unwalked
+candidate, and once per TCMS item -- for BOTH its action-pool and
+navigation-pool comparisons. A single crawl with a TCMS export
+attached can easily need 60-150+ individual embeddings, comfortably
+exceeding 100/min with zero batching and zero backoff -- not a small
+crawl hitting an unusually strict limit, a normal crawl hitting an
+entirely avoidable one.
+
+**Verified the actual API contract live before building against it**
+(this project's own standing practice) -- a 3-text request against
+Gemini's `:batchEmbedContents` endpoint (never used here before;
+every call went through the single-item `:embedContent`) returned
+`{"embeddings": [{"values": [...]}, ...], "usageMetadata": {...}}`,
+vectors in the same order as the requests, exactly the documented
+shape.
+
+**Built both fixes chosen together, not either alone:**
+- `embeddings.py`: new `_gemini_embed_batch()` (the real
+  `:batchEmbedContents` call) and provider-agnostic
+  `embed_texts_batch()` -- chunks a text list into groups of at most
+  100 before calling a provider's batch implementation once per chunk,
+  falling back to one-call-per-text for a provider with no batch
+  implementation registered (none today lack one). Order of returned
+  vectors matches the input exactly, across chunk boundaries.
+- `embeddings.py`: new shared `_post_json_with_retry()`, used by
+  every single AND batch call alike -- retries ONLY a 429, only up to
+  2 times, honoring the wait time Gemini's own error body already
+  names (`"Please retry in 42.86s"`, parsed directly, capped at 60s so
+  a client-reported wait can't hang a crawl indefinitely) rather than
+  guessing at a fixed backoff or failing outright on the first hit.
+  Any other HTTP error still propagates immediately, unchanged from
+  before this existed.
+- `semantic_dedup.py`: the per-flow `embed_text()` loop now computes
+  every unique flow's embedding up front via one `embed_texts_batch()`
+  call, then runs the *exact same* incremental representative-
+  comparison loop as before -- only where the vectors come from
+  changed, not the dedup logic itself.
+- `gap_analysis.py`: new `_embed_dict()` helper (batches a `{key:
+  text}` mapping through `embed_texts_batch()`, preserving keys) used
+  at all seven of the module's individual `embed_text()` call sites --
+  skipped candidates, errors, discovered-but-unwalked candidates, TCMS
+  items (both diagnosis and main matching passes), action text, nav
+  text.
+
+**Verified live, several independent checks, not just "it compiles":**
+- Retry logic verified deterministically WITHOUT touching the real
+  API (no quota wasted re-triggering a rate limit on purpose): faked
+  `urllib.request.urlopen` to raise a real-shaped 429
+  (`"Please retry in 1.2s"`) once, then succeed -- confirmed exactly 2
+  attempts, 1.20s elapsed, matching the parsed wait time precisely.
+- Batch/single consistency verified against the REAL API (small,
+  deliberately cheap: 6 calls total): a 5-text batch call plus one
+  separate single-text call for a duplicate of `texts[0]`. Identical
+  text within the same batch scored `cosine = 1.0000`; the batch
+  vector for `texts[0]` against the SEPARATELY single-called vector
+  for the same text also scored `1.0000` -- batch and single-item
+  embeddings are numerically interchangeable, not just structurally
+  similar. Genuinely different texts scored `0.6550`, confirming real
+  semantic differentiation still holds.
+- Full real crawl with semantic dedup enabled (a 3-branch link-chain
+  fixture, 6 unique flows): `"semantic: 6 compared, 3 merged"` -- ran
+  to completion with ONE batch call instead of 6 individual ones, no
+  errors.
+- Full real gap analysis with a small TCMS file (3 items, 2 matching
+  real flows, 1 deliberately unrelated): both real matches correctly
+  scored `covered` (0.82, 0.79), the unrelated item correctly
+  `not_found` (0.00) -- genuinely correct semantic matching on the
+  batched path, not just "didn't crash."
+
+All 20 existing tests still pass; fixture server and scratch files
+cleaned up; no leftover Playwright processes.

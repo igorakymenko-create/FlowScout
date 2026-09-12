@@ -46,10 +46,66 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
 import urllib.error
 import urllib.request
 
 DEFAULT_PROVIDER = "gemini"
+
+# Batching + retry-with-backoff (Aug 2026) -- added directly from a
+# real run hitting Gemini's free-tier "embed_content_free_tier_requests"
+# quota (100 requests/minute) suspiciously fast. Root cause, found by
+# reading semantic_dedup.py/gap_analysis.py rather than assuming the
+# limit itself was unusually low: every embedding comparison in this
+# project issued ONE unbatched HTTP call per text -- one per unique
+# flow in dedup, plus one per skipped-candidate/error/discovered-but-
+# unwalked-candidate/TCMS-item in gap analysis. A single crawl with a
+# TCMS export attached can easily need 60-150+ individual embeddings,
+# comfortably exceeding a 100/min ceiling with zero batching and zero
+# backoff. Two independent fixes, chosen together rather than either
+# alone papering over the other: batch calls (see embed_texts_batch
+# below) cut the NUMBER of HTTP requests roughly 100x, and retrying a
+# 429 using the wait time Gemini's own error body already names
+# ("Please retry in 42.86s") smooths over whatever this doesn't
+# eliminate outright, instead of failing the whole dedup/gap-analysis
+# pass on the first rate-limit hit.
+_RETRY_SECONDS_RE = re.compile(r"retry in ([\d.]+)\s*s", re.IGNORECASE)
+_MAX_RETRIES = 2
+_MAX_RETRY_WAIT_S = 60.0  # never block a crawl for more than a minute on one retry
+_MAX_BATCH_SIZE = 100
+
+
+def _parse_retry_seconds(detail: str) -> float | None:
+    m = _RETRY_SECONDS_RE.search(detail)
+    return float(m.group(1)) if m else None
+
+
+def _post_json_with_retry(url: str, body: bytes, headers: dict) -> dict:
+    """Shared by every provider's single and batch embed calls. Retries
+    ONLY a 429, and only up to `_MAX_RETRIES` times, honoring the wait
+    time the API's own error body names (capped at `_MAX_RETRY_WAIT_S`
+    so a client bug or an unusually long suggested wait can't hang a
+    crawl indefinitely) -- falls back to a flat 5s if the body doesn't
+    name one. Any other HTTP error, or a 429 on the last retry,
+    propagates as EmbeddingsUnavailable exactly as a single un-retried
+    call already did before this existed."""
+    last_detail = ""
+    for attempt in range(_MAX_RETRIES + 1):
+        req = urllib.request.Request(url, data=body, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            if exc.code != 429 or attempt == _MAX_RETRIES:
+                raise EmbeddingsUnavailable(f"embeddings API returned {exc.code}: {detail}") from exc
+            last_detail = detail
+            wait_s = min(_parse_retry_seconds(detail) or 5.0, _MAX_RETRY_WAIT_S)
+            time.sleep(wait_s)
+        except urllib.error.URLError as exc:
+            raise EmbeddingsUnavailable(f"embeddings API unreachable: {exc}") from exc
+    raise EmbeddingsUnavailable(f"embeddings API still rate-limited after {_MAX_RETRIES} retries: {last_detail}")
 
 
 class EmbeddingsUnavailable(Exception):
@@ -78,6 +134,14 @@ class EmbeddingsUnavailable(Exception):
 # -001 or the -preview variant.
 _GEMINI_MODEL = "gemini-embedding-2"
 _GEMINI_ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{_GEMINI_MODEL}:embedContent"
+# batchEmbedContents (Aug 2026) -- verified live before relying on it
+# (this project's own convention throughout, see ROADMAP.md): a real
+# 3-text request against this exact endpoint returned
+# {"embeddings": [{"values": [...]}, ...], "usageMetadata": {...}},
+# values in the same order as the requests -- exactly the documented
+# shape, no surprises, so no defensive re-checking beyond the existing
+# KeyError/TypeError guard below.
+_GEMINI_BATCH_ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{_GEMINI_MODEL}:batchEmbedContents"
 _GEMINI_KEY_ENV = "GEMINI_API_KEY"
 
 
@@ -94,22 +158,38 @@ def _gemini_embed(text: str, task_type: str) -> list[float]:
         "content": {"parts": [{"text": text}]},
         "embedContentConfig": {"taskType": task_type},
     }).encode("utf-8")
-    req = urllib.request.Request(
-        _GEMINI_ENDPOINT, data=body, method="POST",
-        headers={"Content-Type": "application/json", "x-goog-api-key": key},
+    payload = _post_json_with_retry(
+        _GEMINI_ENDPOINT, body,
+        {"Content-Type": "application/json", "x-goog-api-key": key},
     )
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            payload = json.loads(resp.read())
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise EmbeddingsUnavailable(f"Gemini embeddings API returned {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise EmbeddingsUnavailable(f"Gemini embeddings API unreachable: {exc}") from exc
     try:
         return payload["embedding"]["values"]
     except (KeyError, TypeError) as exc:
         raise EmbeddingsUnavailable(f"Unexpected response shape from Gemini embeddings API: {payload}") from exc
+
+
+def _gemini_embed_batch(texts: list[str], task_type: str) -> list[list[float]]:
+    """Up to `_MAX_BATCH_SIZE` texts in ONE HTTP call -- embed_texts_batch
+    (below) is what actually chunks a longer list down to that size
+    before calling this, so this itself does no chunking of its own."""
+    key = os.environ.get(_GEMINI_KEY_ENV)
+    if not key:
+        raise EmbeddingsUnavailable(f"{_GEMINI_KEY_ENV} is not set")
+
+    body = json.dumps({
+        "requests": [
+            {"model": f"models/{_GEMINI_MODEL}", "content": {"parts": [{"text": t}]}, "taskType": task_type}
+            for t in texts
+        ]
+    }).encode("utf-8")
+    payload = _post_json_with_retry(
+        _GEMINI_BATCH_ENDPOINT, body,
+        {"Content-Type": "application/json", "x-goog-api-key": key},
+    )
+    try:
+        return [e["values"] for e in payload["embeddings"]]
+    except (KeyError, TypeError) as exc:
+        raise EmbeddingsUnavailable(f"Unexpected response shape from Gemini batch embeddings API: {payload}") from exc
 
 
 # ---------------------------------------------------------------------
@@ -212,6 +292,7 @@ def _gemini_embed(text: str, task_type: str) -> list[float]:
 # ---------------------------------------------------------------------
 _PROVIDERS = {
     "gemini": {"configured": _gemini_configured, "embed": _gemini_embed,
+               "embed_batch": _gemini_embed_batch,
                "model_name": _GEMINI_MODEL, "key_env": _GEMINI_KEY_ENV, "verified_live": True},
     # "openai": {"configured": _openai_configured, "embed": _openai_embed,
     #            "model_name": _OPENAI_MODEL, "key_env": _OPENAI_KEY_ENV, "verified_live": False},
@@ -252,6 +333,32 @@ def model_name(provider: str | None = None) -> str:
 
 def embed_text(text: str, task_type: str = "SEMANTIC_SIMILARITY", provider: str | None = None) -> list[float]:
     return _resolve(provider)["embed"](text, task_type)
+
+
+def embed_texts_batch(texts: list[str], task_type: str = "SEMANTIC_SIMILARITY",
+                       provider: str | None = None) -> list[list[float]]:
+    """Batched counterpart to embed_text() -- same one vector per text,
+    far fewer HTTP round-trips. Chunks `texts` into groups of at most
+    `_MAX_BATCH_SIZE` before calling the provider's own batch
+    implementation once per chunk (rather than trusting an unverified
+    per-call limit on the API side) -- order of the returned vectors
+    matches `texts` exactly, across chunk boundaries. Falls back to one
+    call per text for a provider that hasn't implemented batching (none
+    registered today lack it, but a future one might) rather than
+    failing outright. Empty input returns an empty list without making
+    any call at all -- callers building a {key: text} dict from
+    something that turned out empty (a run with nothing to diagnose,
+    say) shouldn't need their own guard for it."""
+    if not texts:
+        return []
+    resolved = _resolve(provider)
+    batch_fn = resolved.get("embed_batch")
+    if batch_fn is None:
+        return [resolved["embed"](t, task_type) for t in texts]
+    out: list[list[float]] = []
+    for i in range(0, len(texts), _MAX_BATCH_SIZE):
+        out.extend(batch_fn(texts[i:i + _MAX_BATCH_SIZE], task_type))
+    return out
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:

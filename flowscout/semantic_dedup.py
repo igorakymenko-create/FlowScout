@@ -168,8 +168,17 @@ def apply_semantic_dedup(run: RunResult, threshold: float = DEFAULT_THRESHOLD) -
     representatives: list[tuple[Flow, list[float], frozenset[str]]] = []
     semantic_merged = 0
     try:
-        for flow in unique_flows:
-            vec = embeddings.embed_text(_flow_text(flow, run.states), provider=provider)
+        # Batched (Aug 2026): one HTTP call per unique flow used to be
+        # exactly the kind of thing that hit Gemini's free-tier 100
+        # req/min ceiling on an ordinary run -- see embeddings.py's own
+        # history. Computing every vector up front, in a handful of
+        # batch calls, changes nothing about the comparison loop below
+        # (still incremental, still compares each flow only against
+        # representatives accumulated so far), just moves where the
+        # embeddings themselves come from.
+        flow_texts = [_flow_text(flow, run.states) for flow in unique_flows]
+        flow_vecs = embeddings.embed_texts_batch(flow_texts, provider=provider)
+        for flow, vec in zip(unique_flows, flow_vecs):
             mutations = mutating_signature_set(flow)
             best_flow, best_score = None, 0.0
             for rep_flow, rep_vec, rep_mutations in representatives:

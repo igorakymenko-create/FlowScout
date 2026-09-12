@@ -222,6 +222,23 @@ def _nav_flow_text(flow: Flow, states: dict) -> str | None:
     return f"Ends on {end_page}. Actions taken: {'; '.join(nav)}."
 
 
+def _embed_dict(items: dict, provider: str | None) -> dict:
+    """Batches a {key: text} mapping through embed_texts_batch(),
+    preserving keys -- same result {k: embed_text(t) for k, t in
+    items.items()} used to build one at a time, in far fewer HTTP
+    calls. Gap analysis has several of these (skipped candidates,
+    errors, discovered-but-unwalked candidates, TCMS items, action
+    text, nav text) -- each one was its own per-item request loop
+    before this existed, a direct contributor to hitting Gemini's
+    free-tier rate limit on an ordinary run with a TCMS export
+    attached (see embeddings.py's own history)."""
+    if not items:
+        return {}
+    keys = list(items.keys())
+    vecs = embeddings.embed_texts_batch([items[k] for k in keys], provider=provider)
+    return dict(zip(keys, vecs))
+
+
 def _match_pool(pool_vecs: dict, tcms_pool: list[TcmsItem], tcms_vecs: dict,
                  threshold: float) -> tuple[dict, dict]:
     """Bidirectional nearest-neighbor between one pool (action
@@ -343,11 +360,10 @@ def _diagnose_not_found(not_found: list[TcmsCoverage], tcms_by_id: dict[str, Tcm
         return
 
     try:
-        skipped_vecs = {k: embeddings.embed_text(t, provider=provider) for k, t in skipped_unique.items()}
-        error_vecs = {m: embeddings.embed_text(m, provider=provider) for m in error_unique}
-        discovered_vecs = {sig: embeddings.embed_text(t, provider=provider) for sig, t in discovered_unique.items()}
-        tcms_vecs = {tc.tcms_id: embeddings.embed_text(tcms_by_id[tc.tcms_id].text(), provider=provider)
-                     for tc in not_found}
+        skipped_vecs = _embed_dict(skipped_unique, provider)
+        error_vecs = _embed_dict({m: m for m in error_unique}, provider)
+        discovered_vecs = _embed_dict(discovered_unique, provider)
+        tcms_vecs = _embed_dict({tc.tcms_id: tcms_by_id[tc.tcms_id].text() for tc in not_found}, provider)
     except EmbeddingsUnavailable:
         return  # diagnosis is a bonus on top of gap analysis, not worth failing the whole thing over
 
@@ -471,9 +487,9 @@ def analyze_gaps(run: RunResult, tcms_items: list[TcmsItem], tcms_source: str,
             tcms_coverage[t.id] = TcmsCoverage(t.id, t.title, "not_found", None, 0.0)
     else:
         try:
-            action_vecs = {sig: embeddings.embed_text(text, provider=provider) for sig, text in action_text.items()}
-            nav_vecs = {fid: embeddings.embed_text(text, provider=provider) for fid, text in nav_text.items()}
-            tcms_vecs = {t.id: embeddings.embed_text(t.text(), provider=provider) for t in remaining_tcms}
+            action_vecs = _embed_dict(action_text, provider)
+            nav_vecs = _embed_dict(nav_text, provider)
+            tcms_vecs = _embed_dict({t.id: t.text() for t in remaining_tcms}, provider)
         except EmbeddingsUnavailable as exc:
             return GapAnalysis(tcms_source=tcms_source, threshold=threshold, status=f"error: {exc}")
 
