@@ -3791,3 +3791,139 @@ new checkpoints, confirming the two new listeners registered on every
 single action add no observable side effect to ordinary crawls.
 
 All 20 existing tests still pass; no leftover Playwright processes.
+
+## Iframes and Shadow DOM (done, Sep 2026)
+
+Continuing the same code-based coverage audit that produced the
+forms-without-`<form>` and dialogs/popups fixes above: grepped the
+crawler for any handling of `<iframe>` or shadow roots and found zero
+matches for either. Both are common in real apps -- embedded payment
+widgets, chat plugins, and third-party auth iframes on one side;
+design-system web components (`<my-button>` etc.) built on Shadow DOM
+on the other -- and both meant the crawler was structurally blind to
+any interactive element living inside one, not merely deprioritizing
+it. The user explicitly chose to build both in one pass rather than
+split them across turns.
+
+**Investigated live before writing any fix, since the two turned out
+to need genuinely different mechanisms:**
+
+- Shadow DOM: confirmed `document.querySelectorAll(...)` does not see
+  into an open shadow root at all (`payload['candidates']` came back
+  empty for a shadow-hosted button), but `page.locator()` *does*
+  pierce shadow roots on its own -- so the missing half was purely
+  discovery, not replay.
+- Iframes: the opposite split. `page.locator()` does **not** auto-pierce
+  an iframe (verified: locator count 0 against a real cross-origin
+  iframe), but `frame.evaluate()` reaches cross-origin iframe content
+  fine via CDP, and `page.frame_locator(...).locator(...)` can find and
+  click cross-origin iframe content too. Rejected the more obvious
+  design (walking the DOM chain of iframe tags via
+  `frame_locator` nesting, keyed on the iframe's own `data-test`/`id`/
+  `src`/nth-index) in favor of a simpler one, verified first in a
+  throwaway script: record `frameUrl = frame.url` on any candidate
+  found outside the main frame at discovery time; at replay time,
+  resolve `scope = page.frame(url=el_meta["frameUrl"]) or page` and
+  build the exact same kind of locator against `scope` instead of
+  `page`. Confirmed live that `page.frame(url=...)` resolves correctly
+  and a locator built on the returned `Frame` finds and clicks
+  cross-origin iframe content.
+
+**A real bug found along the way, not by inspection but by a fix that
+silently didn't work:** shadow-DOM discovery still failed after
+`queryAllDeep` correctly found the button in raw JS testing. Root
+cause: `document.elementFromPoint()` (used by the existing occlusion
+check to confirm a candidate is actually clickable, not hidden under
+something else) does **not** pierce an open shadow root -- it returns
+the shadow *host*, not the internal element
+(`atPointIsHost: True, atPointIsBtn: False`, checked directly),
+contradicting the assumption that Chromium retargets hit-testing
+through shadow boundaries. Every shadow-DOM candidate was registering
+as occluded by its own host and getting silently dropped. Fixed with
+a `deepElementFromPoint(x, y)` helper that recurses through
+`ShadowRoot.elementFromPoint()` at each level; added in both places an
+occlusion check runs (`_DISCOVER_JS`'s own check, and the separate
+`_OCCLUSION_CHECK_JS` used by the replay-time recheck in
+`_wait_until_unoccluded()`, which cannot share scope with
+`_DISCOVER_JS` since it's a different `evaluate()` call).
+
+While tracing that code path, also caught and fixed a second,
+not-yet-triggered bug in the same function: `_wait_until_unoccluded()`
+was calling `page.evaluate(_OCCLUSION_CHECK_JS, handle)`, which always
+runs the callback in the **main frame** regardless of which frame the
+passed element handle actually belongs to -- silently wrong for any
+iframe-nested element once iframe support existed. Fixed to
+`handle.evaluate(_OCCLUSION_CHECK_JS)`, which runs in the handle's own
+frame.
+
+**Built:**
+
+- `_DISCOVER_JS` (`actions.py`): new `queryAllDeep(root, selector)`,
+  recursing into every open shadow root; wired into 5 of the 7
+  `document.querySelectorAll` call sites (the main a/button/input/
+  role=button query, select, radio, checkbox, role=checkbox|radio).
+  Deliberately *not* wired into the other 2 (`findBlockingOverlay()`'s
+  full-page-overlay detector, and the CDP-based div-as-button pool) --
+  an explicit scope limit, not an oversight.
+- `discover_candidates()` (`actions.py`): rewritten to loop over
+  `page.frames` (main frame first, Playwright's own guaranteed
+  ordering), running `_DISCOVER_JS` per frame via `frame.evaluate()`
+  and merging the markup-based candidate types across frames, tagging
+  any candidate found outside the main frame with
+  `el["frameUrl"] = frame.url`. The CDP-based `pool`/
+  `legacyUnclassified` div-as-button detection stays main-frame-only --
+  extending a per-element CDP DOMDebugger session across frames/shadow
+  roots was judged materially bigger and riskier than the rest of this
+  pass, so deliberately deferred rather than folded in silently.
+- `build_locator()` (`actions.py`): now resolves
+  `scope = page.frame(url=el_meta["frameUrl"]) or page` first when
+  `frameUrl` is present, then builds the same kind of locator
+  (`data-test`/`id`/role/etc.) against `scope` instead of `page`
+  directly.
+- No `models.py` changes needed -- `frameUrl` rides inside the
+  existing generic `el_meta`/selector JSON blob, the same mechanism
+  already used for `radioGroup`/`checkboxName`.
+
+**Verified live, through the full real `crawl()` pipeline:**
+
+Shadow DOM -- a fixture page with an ordinary link plus an open
+shadow-DOM button that navigates on click:
+
+```
+States=3 Flows=2
+flow: 'Open "Ordinary link"' -> /ordinary
+flow: 'Click "Shadow DOM button"' -> /shadow-clicked
+```
+
+Both discovered and clicked correctly.
+
+Iframes -- two genuinely cross-origin HTTP servers (outer page on one
+port with an ordinary link plus an `<iframe>` pointing at the other
+port; the iframe's own button navigates the iframe itself on click):
+
+```
+States=3 Flows=3 Checkpoints=0
+flow 1: 'Open "Ordinary link"' -> /ordinary
+flow 2: 'Click "Click me (inside iframe)"', 'Open "Ordinary link"' -> /ordinary
+flow 3: 'Click "Click me (inside iframe)"' -> /
+Root candidates found: ['Ordinary link', 'Click me (inside iframe)']
+Iframe button discovered: True
+frameUrl recorded in el_meta: http://127.0.0.1:8949/
+```
+
+The iframe button is discovered cross-origin via per-frame
+`_DISCOVER_JS`, correctly tagged with its own `frameUrl`, and clicked
+successfully with zero checkpoints -- confirming `build_locator()`'s
+frame resolution plus the existing occlusion-retry/click machinery
+works unchanged against a resolved `Frame` object.
+
+Regression check: a full live crawl of saucedemo.com (login form,
+dropdown-driven navigation, no iframes or shadow DOM anywhere) --
+`States=9 Flows=20`, login succeeded, dropdown-menu flows explored
+identically to before, one checkpoint which is the expected
+`max_flows` limit rather than a new error. The per-frame discovery
+loop adds no observable regression to ordinary single-frame crawls.
+
+All 20 existing tests still pass; both fixture servers and their
+ports confirmed shut down; no leftover Playwright/headless-Chromium
+processes.

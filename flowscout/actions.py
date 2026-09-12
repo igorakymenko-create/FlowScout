@@ -17,13 +17,54 @@ from .risk import classify
 
 _DISCOVER_JS = r"""
 () => {
+    // Recurses into every OPEN shadow root under `root` (a document or
+    // shadow root itself), collecting every element matching `selector`
+    // at any depth -- plain document.querySelectorAll cannot see past a
+    // shadow boundary at all (verified live: a button rendered inside
+    // an open shadow root scored ZERO matches via querySelectorAll,
+    // even though Playwright's OWN locator engine finds and clicks it
+    // just fine -- CSS/text locators pierce open shadow DOM
+    // automatically, so replay was never the problem here, only
+    // discovery was). A CLOSED shadow root (`el.shadowRoot` returns
+    // null) is structurally unreachable by ANY method, including
+    // Playwright's own -- not something this can work around.
+    function queryAllDeep(root, selector) {
+        const found = Array.from(root.querySelectorAll(selector));
+        for (const el of root.querySelectorAll('*')) {
+            if (el.shadowRoot) found.push(...queryAllDeep(el.shadowRoot, selector));
+        }
+        return found;
+    }
+
+    // document.elementFromPoint() does NOT pierce an open shadow root
+    // on its own -- verified live, not assumed: it stops at the shadow
+    // HOST (the element hosting the shadow tree), not the actual
+    // element rendered inside it. Every shadow-DOM candidate this
+    // queryAllDeep() above finds would otherwise register as
+    // "occluded by its own host" and never get clicked -- a real,
+    // blocking bug for this whole feature, found by testing end to
+    // end rather than assuming the occlusion check would just work.
+    // ShadowRoot has its OWN elementFromPoint() that resolves within
+    // that specific tree -- recursing through it reaches the true
+    // topmost element a real click would actually hit, however many
+    // shadow roots deep.
+    function deepElementFromPoint(x, y) {
+        let el = document.elementFromPoint(x, y);
+        while (el && el.shadowRoot) {
+            const inner = el.shadowRoot.elementFromPoint(x, y);
+            if (!inner || inner === el) break;
+            el = inner;
+        }
+        return el;
+    }
+
     // Plain 'a' (not 'a[href]'): some real, functional links are JS-driven
     // with no href at all -- e.g. saucedemo's cart icon is
     // <a data-test="shopping-cart-link" class="shopping_cart_link"> with
     // no href attribute. Requiring href silently made it (and anything
     // built the same way) invisible to discovery from the very first run.
     const sel = 'a, button, input[type=submit], input[type=button], [role="button"]';
-    const nodes = Array.from(document.querySelectorAll(sel));
+    const nodes = queryAllDeep(document, sel);
     const vw = window.innerWidth || document.documentElement.clientWidth;
     const vh = window.innerHeight || document.documentElement.clientHeight;
     const isRelatedToCandidate = (el) => nodes.some(c => el === c || el.contains(c) || c.contains(el));
@@ -177,7 +218,7 @@ _DISCOVER_JS = r"""
             const left = Math.max(r.left, 0), right = Math.min(r.right, vw);
             const top = Math.max(r.top, 0), bottom = Math.min(r.bottom, vh);
             const cx = (left + right) / 2, cy = (top + bottom) / 2;
-            atPoint = document.elementFromPoint(cx, cy);
+            atPoint = deepElementFromPoint(cx, cy);
             occluded = !atPoint || !(n.contains(atPoint) || atPoint.contains(n));
         }
         // Applies regardless of inViewport above -- see
@@ -361,7 +402,7 @@ _DISCOVER_JS = r"""
     // value/text for identity -- see identity.py's mutating_signature_set
     // for why the choice itself, not just "a select happened", matters.
     const selects = [];
-    for (const s of document.querySelectorAll('select')) {
+    for (const s of queryAllDeep(document, 'select')) {
         const r = s.getBoundingClientRect();
         const style = getComputedStyle(s);
         if (r.width <= 0 || r.height <= 0 || style.visibility === 'hidden'
@@ -438,7 +479,7 @@ _DISCOVER_JS = r"""
     // than dropped.
     const radios = [];
     let ungroupedSeq = 0;
-    for (const el of document.querySelectorAll('input[type=radio]')) {
+    for (const el of queryAllDeep(document, 'input[type=radio]')) {
         if (!isUsableInput(el)) continue;
         const groupName = el.name || `__ungrouped_${ungroupedSeq++}`;
         radios.push({
@@ -467,7 +508,7 @@ _DISCOVER_JS = r"""
     // identity -- ticking a checkbox just isn't exclusive with its
     // siblings the way those are.
     const checkboxes = [];
-    for (const el of document.querySelectorAll('input[type=checkbox]')) {
+    for (const el of queryAllDeep(document, 'input[type=checkbox]')) {
         if (!isUsableInput(el)) continue;
         checkboxes.push({
             tag: 'checkbox',
@@ -511,7 +552,7 @@ _DISCOVER_JS = r"""
     // captured here has a good chance of matching what get_by_role
     // will actually find.
     const roleControls = [];
-    for (const el of document.querySelectorAll('[role="checkbox"], [role="radio"]')) {
+    for (const el of queryAllDeep(document, '[role="checkbox"], [role="radio"]')) {
         if (el.tagName === 'INPUT') continue;
         if (!isUsableInput(el)) continue;
         const role = el.getAttribute('role');
@@ -954,24 +995,44 @@ def discover_candidates(page, current_domain: str, allowed_domains: list[str],
     or pointer-events:none) -- correctly never clicked, surfaced anyway
     since "this control exists but isn't available right now" is a real
     finding (e.g. a wizard option gated behind an earlier choice).
+
+    Runs across every frame in the page (`page.frames`), not just the
+    main one (Aug 2026) -- a same- or cross-origin <iframe>'s own
+    content was previously completely invisible: it's a genuinely
+    separate document, so the top-level document.querySelectorAll this
+    used to run can't see into it at all, and neither can a plain
+    page.locator() at replay time (verified live against a real
+    cross-origin iframe before building this: `frame.evaluate()`
+    reaches in via CDP regardless of origin, but page.locator() itself
+    finds nothing). Only the MARKUP-based candidate types
+    (candidates/selects/radios/checkboxes/roleControls) are gathered
+    from non-main frames -- the CDP-based div-as-button pool
+    (_verify_pool, below) stays main-frame-only for this pass:
+    extending its own DOMDebugger session per-frame is a materially
+    bigger, riskier change than this one covers. Each candidate found
+    outside the main frame is tagged with `frameUrl` (see
+    build_locator's own frame-resolution logic) so it can be relocated
+    on replay; main-frame elements are untagged, identical to before
+    this existed.
     """
-    payload = page.evaluate(_DISCOVER_JS)
-    formal: list[tuple[dict, str, bool]] = [(el, "markup", False) for el in payload["candidates"]]
-    formal += [(el, "markup", False) for el in payload.get("selects", [])]
-    # Radios/checkboxes are markup-matched the same way selects are: found by
-    # tag, not by CDP handler-verification (they're native controls, always
-    # real). is_choice is set inside _build_candidate itself for these tags
-    # (mirrors "select"), so the flag here is a don't-care placeholder.
-    formal += [(el, "markup", False) for el in payload.get("radios", [])]
-    formal += [(el, "markup", False) for el in payload.get("checkboxes", [])]
-    # role="checkbox"/role="radio" custom controls (Radix/shadcn-style
-    # component libraries) -- same "markup-matched, not CDP-verified"
-    # reasoning as radios/checkboxes above, found by role attribute
-    # instead of a native input tag. See _DISCOVER_JS's own comment for
-    # why this exists (a native <input> alongside these is often a
-    # deliberately non-interactive decoy for form semantics only).
-    formal += [(el, "markup", False) for el in payload.get("roleControls", [])]
-    pool = payload["pool"]
+    formal: list[tuple[dict, str, bool]] = []
+    pool: list[dict] = []
+    legacy_unclassified_raw: list[dict] = []
+    for frame in page.frames:
+        try:
+            payload = frame.evaluate(_DISCOVER_JS)
+        except Exception:
+            continue  # a torn-down or not-yet-loaded frame -- skip it, not fatal to the rest
+        is_main = frame == page.main_frame
+        frame_url = "" if is_main else frame.url
+        for key in ("candidates", "selects", "radios", "checkboxes", "roleControls"):
+            for el in payload.get(key, []):
+                if frame_url:
+                    el["frameUrl"] = frame_url
+                formal.append((el, "markup", False))
+        if is_main:
+            pool = payload["pool"]
+            legacy_unclassified_raw = payload.get("legacyUnclassified", [])
 
     unclassified: list[dict] = []
     promoted: list[tuple[dict, str, bool]] = []
@@ -980,7 +1041,7 @@ def discover_candidates(page, current_domain: str, allowed_domains: list[str],
         try:
             verified = _verify_pool(page, pool)
         except Exception:
-            unclassified = _aggregate_unclassified(payload["legacyUnclassified"])
+            unclassified = _aggregate_unclassified(legacy_unclassified_raw)
         else:
             verified_indices = [i for i, ok in enumerate(verified) if ok]
             outermost = _dedupe_outermost(page, verified_indices)
@@ -1019,20 +1080,34 @@ def discover_candidates(page, current_domain: str, allowed_domains: list[str],
 
 
 def build_locator(page, el_meta: dict):
+    scope = page
+    frame_url = el_meta.get("frameUrl")
+    if frame_url:
+        # Discovered inside an <iframe> (see discover_candidates' own
+        # per-frame pass, Aug 2026) -- resolve the SAME frame by its
+        # own URL rather than walking a chain of iframe DOM elements
+        # down to it: page.frame(url=...) finds a frame anywhere in
+        # the tree (any nesting depth) directly, verified live before
+        # relying on it against a real cross-origin iframe. Falls back
+        # to `page` itself if the frame isn't present on replay (not
+        # loaded yet, or the app genuinely changed) -- every selector
+        # below will then simply find nothing, a clear "not found"
+        # rather than a silent wrong-frame match.
+        scope = page.frame(url=frame_url) or page
     if el_meta.get("dataTest"):
-        return page.locator(f'[data-test="{el_meta["dataTest"]}"]').first
+        return scope.locator(f'[data-test="{el_meta["dataTest"]}"]').first
     if el_meta.get("id"):
-        return page.locator(f'#{el_meta["id"]}').first
+        return scope.locator(f'#{el_meta["id"]}').first
     if el_meta.get("tag") == "radio":
         # Structural (type+name+value), not text: radio labels are often
         # short and generic ("Yes", "Small") -- more likely to collide
         # elsewhere on the page than a select's own dataTest/id would be,
         # so this is tried before falling all the way to text.
-        return page.locator(
+        return scope.locator(
             f'input[type="radio"][name="{el_meta["radioGroup"]}"][value="{el_meta["radioValue"]}"]'
         ).first
     if el_meta.get("tag") == "checkbox":
-        return page.locator(
+        return scope.locator(
             f'input[type="checkbox"][name="{el_meta["checkboxName"]}"][value="{el_meta["checkboxValue"]}"]'
         ).first
     if el_meta.get("tag") in ("role-checkbox", "role-radio"):
@@ -1046,10 +1121,10 @@ def build_locator(page, el_meta: dict):
         # its aria-checked/data-state, which raw CSS never could have).
         role = "checkbox" if el_meta["tag"] == "role-checkbox" else "radio"
         name = el_meta.get("roleAccessibleName") or el_meta.get("text") or ""
-        return page.get_by_role(role, name=name, exact=True).first
+        return scope.get_by_role(role, name=name, exact=True).first
     if el_meta.get("href"):
-        return page.locator(f'{el_meta["tag"]}[href="{el_meta["href"]}"]').first
-    return page.get_by_text(el_meta["text"], exact=True).first
+        return scope.locator(f'{el_meta["tag"]}[href="{el_meta["href"]}"]').first
+    return scope.get_by_text(el_meta["text"], exact=True).first
 
 
 def _synth_value(name: str, type_: str, credentials: dict) -> str:
@@ -1456,6 +1531,22 @@ def perform_action(page, el_meta: dict, credentials: dict, timeout_ms: int = 800
 
 
 _OCCLUSION_CHECK_JS = """(el) => {
+    // Same deepElementFromPoint reasoning as _DISCOVER_JS's own copy
+    // (a separate copy here, not shared code -- this runs as its own
+    // standalone evaluate() at replay time): plain
+    // document.elementFromPoint() stops at an open shadow root's HOST,
+    // not the actual element rendered inside it -- verified live,
+    // found to make every shadow-DOM element register as permanently
+    // "occluded by its own host" without this.
+    function deepElementFromPoint(x, y) {
+        let n = document.elementFromPoint(x, y);
+        while (n && n.shadowRoot) {
+            const inner = n.shadowRoot.elementFromPoint(x, y);
+            if (!inner || inner === n) break;
+            n = inner;
+        }
+        return n;
+    }
     const r = el.getBoundingClientRect();
     const vw = window.innerWidth || document.documentElement.clientWidth;
     const vh = window.innerHeight || document.documentElement.clientHeight;
@@ -1464,7 +1555,7 @@ _OCCLUSION_CHECK_JS = """(el) => {
     const left = Math.max(r.left, 0), right = Math.min(r.right, vw);
     const top = Math.max(r.top, 0), bottom = Math.min(r.bottom, vh);
     const cx = (left + right) / 2, cy = (top + bottom) / 2;
-    const atPoint = document.elementFromPoint(cx, cy);
+    const atPoint = deepElementFromPoint(cx, cy);
     const occluded = !atPoint || !(el.contains(atPoint) || atPoint.contains(el));
     return {occluded, blocker: (occluded && atPoint) ? (atPoint.className || atPoint.tagName || '').toString().slice(0, 60) : ''};
 }"""
@@ -1510,7 +1601,18 @@ def _wait_until_unoccluded(page, loc, max_wait_ms: int = 2000, poll_interval_ms:
     blocker = ""
     for i in range(attempts):
         try:
-            result = page.evaluate(_OCCLUSION_CHECK_JS, handle)
+            # handle.evaluate(...), NOT page.evaluate(..., handle) --
+            # the callback's own document.elementFromPoint() has to run
+            # in the SAME document the element actually lives in.
+            # page.evaluate() always runs in the main frame regardless
+            # of which frame a passed-in handle belongs to -- harmless
+            # for an ordinary main-frame element, but silently wrong
+            # for one discovered inside an <iframe> (see
+            # discover_candidates' own per-frame pass): "document" in
+            # the callback would mean the WRONG document entirely.
+            # ElementHandle.evaluate() runs in the handle's own frame,
+            # correctly, regardless of where it came from.
+            result = handle.evaluate(_OCCLUSION_CHECK_JS)
         except Exception:
             return ""  # element detached mid-check or similar -- not this function's call either
         if not result.get("occluded"):
