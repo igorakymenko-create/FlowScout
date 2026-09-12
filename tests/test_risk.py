@@ -25,8 +25,8 @@ def test_href_match_unaffected_by_the_label_check():
     """Backward compatibility: an ordinary href-based exclude pattern
     (the only kind that existed before this fix) must behave exactly as
     it did before."""
-    risk, reason = classify("Privacy Policy", "https://amfit.net/en/privacy",
-                             "amfit.net", ["amfit.net"], ["*/privacy*"])
+    risk, reason = classify("Privacy Policy", "https://site-b.example/en/privacy",
+                             "site-b.example", ["site-b.example"], ["*/privacy*"])
     assert risk == Risk.DESTRUCTIVE
     assert "label" not in reason
 
@@ -35,16 +35,16 @@ def test_url_shaped_pattern_does_not_leak_into_label_matching():
     """A pattern written for a URL path ('*/privacy*') shouldn't
     accidentally start matching unrelated label text -- ordinary label
     text doesn't contain '/', so this should stay additive."""
-    risk, _ = classify("Home", "https://amfit.net/en/home", "amfit.net",
-                        ["amfit.net"], ["*/privacy*"])
+    risk, _ = classify("Home", "https://site-b.example/en/home", "site-b.example",
+                        ["site-b.example"], ["*/privacy*"])
     assert risk == Risk.SAFE
 
 
 def test_label_shaped_pattern_does_not_leak_into_href_matching():
     """The reverse: a label-shaped pattern shouldn't accidentally match
     an unrelated href path."""
-    risk, _ = classify("Home", "https://amfit.net/en/home", "amfit.net",
-                        ["amfit.net"], ["*checkout*"])
+    risk, _ = classify("Home", "https://site-b.example/en/home", "site-b.example",
+                        ["site-b.example"], ["*checkout*"])
     assert risk == Risk.SAFE
 
 

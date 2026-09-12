@@ -33,29 +33,37 @@ writes your tests for you" — and a more honest one.
   (sequentially — see `ROADMAP.md` for why not in parallel) into one
   report, so admin-only flows and standard-user flows don't collapse
   into each other.
+- **Resumes what a budget cut short**, without a full re-crawl: a flow
+  truncated by `max_depth`, or dead-ended by risk policy, can be
+  continued on its own with adjusted limits ("Resume this flow"), or
+  every currently-resumable flow can be continued in one click
+  ("Resume all blocked flows") — sequentially, since they share one
+  state graph. A flow that's genuinely carried further this way
+  changes its own status instead of sitting there stale forever.
+- **Lets an operator hand over a specific parameter combination** the
+  crawler can't find on its own: several checkboxes/radios/selects set
+  *together* can gate content no single-action DFS pass will ever
+  reach (see `ROADMAP.md`'s "conjunctive multi-parameter gating"
+  entry) — pick the values, and exploration continues automatically
+  from whatever that combination reveals.
 - A **local operator UI** (FastAPI + vanilla JS, no build step) to
   configure and run crawls, attach a TCMS export, and browse reports —
   or drive all of this from the CLI / a CI job instead.
 
 ## Install
 
+**Not yet published to PyPI** — install from source:
+
 ```bash
-pip install flowscout
+git clone https://github.com/igorakymenko-create/FlowScout.git
+cd FlowScout
+pip install -e ".[dev]"
 playwright install chromium
 ```
 
 The `playwright install` step downloads a Chromium build (~150 MB) —
 it's a one-time setup, not a FlowScout-specific quirk, but it's easy to
 miss and the first run will fail without it.
-
-For local development instead of a package install:
-
-```bash
-git clone <this repo>
-cd flowscout
-pip install -e ".[dev]"
-playwright install chromium
-```
 
 ## Quickstart
 
@@ -110,6 +118,13 @@ story (OpenAI/Voyage AI support exists in the code but is paused,
 commented out, pending a working billing setup to verify it against a
 real API call).
 
+Embedding calls are batched (Gemini's `:batchEmbedContents`, up to 100
+texts per request) and retried once on a 429, honoring the wait time
+the API's own error names — found necessary on real runs: comparing
+many flows and TCMS items one-request-per-text hit the free tier's
+rate limit far faster than the actual comparison work would suggest
+(see `ROADMAP.md`).
+
 ## Project layout
 
 ```
@@ -132,12 +147,14 @@ before the source code does.
 ## Status
 
 Alpha. Built and verified against public demo/practice sites
-(saucedemo.com, httpbin.org, quotes.toscrape.com) and one real site
-(amfit.net) during development. No test suite existed for most of this
-project's history — live verification against real sites was the
-primary correctness discipline instead (see `ROADMAP.md`); `tests/`
-now covers the parts of that discipline that fit a deterministic,
-offline test.
+(saucedemo.com, httpbin.org, quotes.toscrape.com) and one real,
+unaffiliated third-party site during development (referred to as
+"Site B" throughout `ROADMAP.md` — not named here since it wasn't a
+demo site built for this kind of testing). No test suite existed for
+most of this project's history — live verification against real sites
+was the primary correctness discipline instead (see `ROADMAP.md`);
+`tests/` now covers the parts of that discipline that fit a
+deterministic, offline test.
 
 ## License
 

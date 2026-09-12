@@ -16,9 +16,10 @@ projects/
 .env*
 !.env.example
 
-# configs/amfit.json points at a real, unaffiliated third-party site
-# (amfit.net) used during development for live verification against a
-# non-demo target -- kept locally, not committed. configs/saucedemo*.json
-# (a public practice/demo site built for exactly this kind of testing)
-# stay tracked as the example config.
+# This filename points at a real, unaffiliated third-party site
+# ("Site B" throughout ROADMAP.md) used during development for live
+# verification against a non-demo target -- kept locally, not
+# committed. configs/saucedemo*.json (a public practice/demo site
+# built for exactly this kind of testing) stay tracked as the example
+# config.
 configs/amfit.json
