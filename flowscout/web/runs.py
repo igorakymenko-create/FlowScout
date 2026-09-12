@@ -287,7 +287,24 @@ def _credentials_for_persona(config: dict, persona_name: str) -> dict:
     return config.get("credentials", {})
 
 
-def resume_flow_in_run(run_id: str, flow_id: int, limit_overrides: dict) -> RunResult:
+def _flow_delta(before: dict, after: dict) -> dict:
+    """{flows_total/unique/duplicate/blocked} before vs after one
+    operator action (resume/resume-all/explore-combination), as a
+    caller-facing summary -- added directly from a real report: an
+    operator ran "Resume all blocked flows" on 12 flows and it
+    genuinely worked (98 new flows, 11 newly unique), but the response
+    only ever said `{"summary": run.summary()}` -- aggregate totals for
+    the WHOLE run, indistinguishable from "this action did nothing" to
+    anyone who didn't already know the run's exact prior counts."""
+    return {
+        "new_flows": after["flows_total"] - before["flows_total"],
+        "new_unique": after["flows_unique"] - before["flows_unique"],
+        "new_duplicate": after["flows_duplicate"] - before["flows_duplicate"],
+        "new_blocked": after["flows_blocked"] - before["flows_blocked"],
+    }
+
+
+def resume_flow_in_run(run_id: str, flow_id: int, limit_overrides: dict) -> dict:
     """Loads a completed run from disk, continues exploring from one
     specific BLOCKED (resumable) flow with adjusted limits (see
     crawler.resume_flow), and writes the result back in place -- same
@@ -311,8 +328,10 @@ def resume_flow_in_run(run_id: str, flow_id: int, limit_overrides: dict) -> RunR
     if flow is None:
         raise ValueError(f"no flow #{flow_id} in run {run_id}")
 
+    before = run.summary()
     credentials = _credentials_for_persona(run.config, flow.persona)
     resume_flow(run, flow, limit_overrides, credentials)
+    delta = _flow_delta(before, run.summary())
 
     flows_path.write_text(json.dumps(run.to_json(), indent=2), encoding="utf-8")
 
@@ -332,7 +351,7 @@ def resume_flow_in_run(run_id: str, flow_id: int, limit_overrides: dict) -> RunR
 
     changes = _load_change_report(out_dir)
     (out_dir / "report.html").write_text(render_html(run, gap, changes, run_id=run_id), encoding="utf-8")
-    return run
+    return {"run": run, "delta": delta}
 
 
 def resume_all_blocked_in_run(run_id: str, depth_increment: int = 5,
@@ -377,6 +396,7 @@ def resume_all_blocked_in_run(run_id: str, depth_increment: int = 5,
         raise FileNotFoundError(f"no completed run at {run_id}")
     run = RunResult.from_json(json.loads(flows_path.read_text(encoding="utf-8")))
 
+    before = run.summary()
     targets = [f for f in run.flows if f.resumable]
     results: list[dict] = []
     for flow in targets:
@@ -407,11 +427,11 @@ def resume_all_blocked_in_run(run_id: str, depth_increment: int = 5,
 
     changes = _load_change_report(out_dir)
     (out_dir / "report.html").write_text(render_html(run, gap, changes, run_id=run_id), encoding="utf-8")
-    return {"run": run, "results": results}
+    return {"run": run, "results": results, "delta": _flow_delta(before, run.summary())}
 
 
 def explore_combination_in_run(run_id: str, state_fp: str, candidate_indices: list[int],
-                                limit_overrides: dict) -> RunResult:
+                                limit_overrides: dict) -> dict:
     """Same shape as resume_flow_in_run() (loads from disk, mutates,
     writes back in place) but seeds from a user-chosen SET of is_choice
     candidates on one already-known state instead of an existing
@@ -439,8 +459,10 @@ def explore_combination_in_run(run_id: str, state_fp: str, candidate_indices: li
         if owner is not None:
             persona_name = owner.persona
 
+    before = run.summary()
     credentials = _credentials_for_persona(run.config, persona_name)
     explore_combination(run, state_fp, candidate_indices, limit_overrides, credentials, persona_name)
+    delta = _flow_delta(before, run.summary())
 
     flows_path.write_text(json.dumps(run.to_json(), indent=2), encoding="utf-8")
 
@@ -453,7 +475,7 @@ def explore_combination_in_run(run_id: str, state_fp: str, candidate_indices: li
 
     changes = _load_change_report(out_dir)
     (out_dir / "report.html").write_text(render_html(run, gap, changes, run_id=run_id), encoding="utf-8")
-    return run
+    return {"run": run, "delta": delta}
 
 
 def confirm_tcms_link(project: str, identity: str, tcms_id: str) -> None:

@@ -274,12 +274,12 @@ async def resume_flow(run_id: str, body: dict):
         raise HTTPException(400, "flow_id is required")
     limit_overrides = body.get("limits") or {}
     try:
-        run = await asyncio.to_thread(runs_module.resume_flow_in_run, run_id, int(flow_id), limit_overrides)
+        result = await asyncio.to_thread(runs_module.resume_flow_in_run, run_id, int(flow_id), limit_overrides)
     except FileNotFoundError:
         raise HTTPException(404, "run not found") from None
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
-    return {"summary": run.summary()}
+    return {"summary": result["run"].summary(), "delta": result["delta"]}
 
 
 @app.post("/api/runs/{run_id}/resume-all")
@@ -306,7 +306,7 @@ async def resume_all_endpoint(run_id: str, body: dict):
         raise HTTPException(404, "run not found") from None
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
-    return {"summary": result["run"].summary(), "results": result["results"]}
+    return {"summary": result["run"].summary(), "results": result["results"], "delta": result["delta"]}
 
 
 @app.post("/api/runs/{run_id}/explore-combination")
@@ -328,7 +328,7 @@ async def explore_combination_endpoint(run_id: str, body: dict):
         raise HTTPException(400, "candidate_indices must be a non-empty list")
     limit_overrides = body.get("limits") or {}
     try:
-        run = await asyncio.to_thread(
+        result = await asyncio.to_thread(
             runs_module.explore_combination_in_run, run_id, state_fp,
             [int(i) for i in candidate_indices], limit_overrides)
     except FileNotFoundError:
@@ -337,7 +337,7 @@ async def explore_combination_endpoint(run_id: str, body: dict):
         raise HTTPException(400, str(exc)) from None
     except RuntimeError as exc:
         raise HTTPException(422, str(exc)) from None
-    return {"summary": run.summary()}
+    return {"summary": result["run"].summary(), "delta": result["delta"]}
 
 
 @app.get("/api/projects/{project}/state")

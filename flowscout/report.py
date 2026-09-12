@@ -97,12 +97,22 @@ def _flow_card_html(flow, states: dict, show_persona: bool = False,
     persona_html = f'<span class="risk-chip risk-neutral">{_esc(flow.persona)}</span>' if show_persona else ""
     resume_html = (_resume_box_html(flow, run_id, default_allow_mutating)
                    if run_id and flow.resumable else "")
+    # origin_note (Aug 2026): only ever set on a flow an operator action
+    # produced afterward (Resume this flow/Resume all/Test this
+    # combination), never a normal crawl pass -- see Flow.origin_note's
+    # own docstring for the live gap this closes: an operator running
+    # "Resume all blocked flows" on 12 flows had no way to tell, from the
+    # report alone, which of the resulting cards were the new result
+    # versus which were there before.
+    origin_html = (f'<span class="risk-chip risk-safe" title="{_esc(flow.origin_note)}">'
+                   f'↳ {_esc(flow.origin_note)}</span>' if flow.origin_note else "")
     return f"""
         <article class="flow-card">
           <header class="flow-head">
             <span class="flow-id">#{flow.id}</span>
             <span class="pill {status_class}">{status_label}</span>
             {persona_html}
+            {origin_html}
             <span class="flow-end mono">{end_url}</span>
             <span class="flow-len">{len(flow.transitions)} step{'s' if len(flow.transitions) != 1 else ''}</span>
           </header>
@@ -611,6 +621,30 @@ def _resume_script_html() -> str:
     # run_id condition and there's no reason to split them.
     return """
 <script>
+// Shared by all three actions below (Aug 2026) -- found live that
+// "Done — reloading…" alone isn't enough: an operator resumed 12
+// blocked flows, it genuinely worked (98 new flows, 11 newly unique),
+// but the immediate reload gave no indication of that, and nothing
+// in the reloaded report singled out which cards were new (see
+// Flow.origin_note's own docstring for the other half of this fix).
+// Formats the {new_flows, new_unique, new_duplicate, new_blocked}
+// delta the backend now returns into one readable line.
+function flowscoutDeltaText(delta) {
+  if (!delta || delta.new_flows === 0) return 'no new flows found';
+  const parts = [];
+  if (delta.new_unique) parts.push(`${delta.new_unique} new unique`);
+  if (delta.new_duplicate) parts.push(`${delta.new_duplicate} duplicate`);
+  if (delta.new_blocked) parts.push(`${delta.new_blocked} still blocked`);
+  return `${delta.new_flows} new flow${delta.new_flows !== 1 ? 's' : ''} found`
+    + (parts.length ? ` (${parts.join(', ')})` : '');
+}
+
+// Pause before reloading so the summary line above is actually
+// readable, not overwritten mid-render by the reload it precedes.
+function flowscoutSleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function flowscoutResume(runId, flowId, btn) {
   const box = btn.closest('.resume-box');
   const depth = Number(box.querySelector('.resume-depth').value);
@@ -644,7 +678,8 @@ async function flowscoutResume(runId, flowId, btn) {
       btn.disabled = false;
       return;
     }
-    statusEl.textContent = 'Done — reloading…';
+    statusEl.textContent = `Done — ${flowscoutDeltaText(data.delta)} — reloading…`;
+    await flowscoutSleep(2500);
     window.location.reload();
   } catch (e) {
     statusEl.textContent = 'Failed: ' + e;
@@ -689,7 +724,8 @@ async function flowscoutExploreCombination(runId, btn) {
       btn.disabled = false;
       return;
     }
-    statusEl.textContent = 'Done — reloading…';
+    statusEl.textContent = `Done — ${flowscoutDeltaText(data.delta)} — reloading…`;
+    await flowscoutSleep(2500);
     window.location.reload();
   } catch (e) {
     statusEl.textContent = 'Failed: ' + e;
@@ -731,7 +767,9 @@ async function flowscoutResumeAll(runId, btn) {
     const results = data.results || [];
     const okCount = results.filter(r => r.status === 'ok').length;
     const errCount = results.length - okCount;
-    statusEl.textContent = `Done — ${okCount} resumed${errCount ? `, ${errCount} failed` : ''} — reloading…`;
+    statusEl.textContent = `Done — ${okCount} resumed${errCount ? `, ${errCount} failed` : ''}, `
+      + `${flowscoutDeltaText(data.delta)} — reloading…`;
+    await flowscoutSleep(2500);
     window.location.reload();
   } catch (e) {
     statusEl.textContent = 'Failed: ' + e;

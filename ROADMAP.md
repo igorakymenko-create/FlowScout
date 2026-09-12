@@ -3435,3 +3435,81 @@ shape.
 
 All 20 existing tests still pass; fixture server and scratch files
 cleaned up; no leftover Playwright processes.
+
+
+## "Resume all" looked like it did nothing -- it didn't (done, Aug 2026)
+
+Reported directly: resumed 12 blocked flows via "Resume all blocked
+flows", it ran for ~800 seconds, the elapsed-time UI eventually
+disappeared, but none of the blocked flows changed in the report.
+Investigated the user's OWN real run on disk before assuming
+anything -- this project's standing practice, not a formality here:
+the server log showed `POST .../resume-all` returned a clean `200 OK`,
+and `flows.json` was genuinely rewritten (98 new flows added across
+the 12 resumes, each one verified directly to be a real extension of
+its own blocked flow's exact path, not something unrelated). 11 of the
+98 were newly UNIQUE -- e.g. a "Show password" toggle sequence and
+deeper navigation into previously-unreached pages. **The backend
+worked correctly and found real coverage.**
+
+**Three things combined to make it look like nothing happened, none of
+them a backend bug:**
+1. The original 12 blocked flows never change -- by design,
+   `resume_flow()` only appends new flows, so anyone looking at those
+   exact 12 cards afterward would correctly see them unchanged.
+2. 87 of the 98 new flows landed as DUPLICATE (revisits to already-
+   explored pages) -- and duplicates render inside a collapsed
+   `<details>` ("Show N duplicate flows"), closed by default.
+3. The "Resume all" box itself always shows the CURRENT resumable
+   count (still 12, since the original blocked flows stay
+   `resumable=True` forever) -- reads as "stuck at 12" even on a
+   completely successful run.
+
+**Built both fixes chosen together:**
+- `models.py`: new `Flow.origin_note: str = ""` -- empty for a flow
+  from a normal crawl pass, a short human-readable note
+  (`"Resumed from flow #5"`, `"Set via a user-specified parameter
+  combination"`, `"Continued after testing a parameter combination"`)
+  for one an operator action produced. `RunResult.from_json()`'s
+  manual `Flow(...)` reconstruction updated too -- checked proactively
+  before shipping, the same class of bug this project has hit before
+  (a new field silently dropped on reload).
+- `crawler.py`: `_run_dfs()` gained an `origin_note` parameter, stamped
+  onto every `Flow` its `emit_flow()` closure creates -- `crawl()`'s
+  own call leaves it empty (default), `resume_flow()`'s call sets it
+  to `f"Resumed from flow #{flow.id}"`, `explore_combination()` sets
+  it directly on its own manually-built Flow plus on its own
+  `_run_dfs()` continuation call.
+- `report.py`: flow cards now show a small chip (`↳ {origin_note}`)
+  right in the header when `origin_note` is set -- visible whether the
+  card is unique or tucked inside the collapsed duplicates section.
+- `web/runs.py`: new `_flow_delta(before, after)` -- `run.summary()`
+  snapshots taken before and after the actual operation, diffed into
+  `{new_flows, new_unique, new_duplicate, new_blocked}`. All three
+  operator-action endpoints (`resume_flow_in_run`,
+  `resume_all_blocked_in_run`, `explore_combination_in_run`) now return
+  this alongside the run, and `web/app.py`'s three endpoints include it
+  in their JSON response.
+- `report.py`'s JS: new shared `flowscoutDeltaText(delta)` formats the
+  delta into one line (`"6 new flows found (3 new unique)"`); all
+  three actions now show it in the final status line BEFORE reloading,
+  with a genuine 2.5s pause (`flowscoutSleep`) so the line is actually
+  readable instead of flashing for a few milliseconds before the
+  reload wipes it -- the same class of oversight `window.location.
+  reload()` firing immediately after setting the text would have
+  repeated otherwise.
+
+**Verified live, against a real backend call, not just that it
+compiles:** a 3-branch fixture (identical shape to earlier tests) --
+before: 6 flows, 3 resumable. After `resume_all_blocked_in_run`:
+`delta = {'new_flows': 6, 'new_unique': 3, 'new_duplicate': 0,
+'new_blocked': 3}`, cross-checked by hand against the run's own
+before/after `summary()` totals (`6/6/0/6` after minus the recorded
+`before` -- matched exactly). All 6 new flows carried
+`origin_note == "Resumed from flow #<id>"`; `report.html` on disk
+contained both the badge text and its CSS class. Repeated for the
+single-flow `resume_flow_in_run()` too: `delta = {'new_flows': 2,
+'new_unique': 1, 'new_duplicate': 0, 'new_blocked': 1}`, badge present.
+All 20 existing tests still pass; fixture server and scratch run
+directories cleaned up; the user's own real run on disk was read for
+investigation but never written to; no leftover Playwright processes.

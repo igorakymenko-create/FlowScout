@@ -171,7 +171,8 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
              max_depth: int, max_breadth: int, max_states: int, max_flows: int,
              max_action_repeat: int, allow_mutating: bool,
              states_before: int, flows_before: int, show_persona_suffix: bool,
-             seq_to_flow_id: dict[tuple, int], revisit_history: set[str]) -> None:
+             seq_to_flow_id: dict[tuple, int], revisit_history: set[str],
+             origin_note: str = "") -> None:
     """The DFS loop itself -- extracted (Aug 2026) so crawl()'s own
     per-persona pass and resume_flow()'s targeted continuation from a
     single already-BLOCKED flow can share it instead of duplicating the
@@ -186,7 +187,12 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
     budgets count *up from* -- computed fresh at call time by the
     caller, so a resumed continuation gets its own full budget starting
     at 0, not the remainder of whatever the original pass had already
-    spent."""
+    spent.
+
+    `origin_note`: stamped onto every Flow this call emits (see
+    Flow.origin_note's own docstring) -- empty for crawl()'s own normal
+    pass, a short note identifying which operator action produced these
+    flows for resume_flow()/explore_combination()'s calls."""
     def emit_flow(path: list[Transition], end_fp: str, forced_status: FlowStatus | None = None,
                   extra_reason: str = "", resumable: bool = False) -> Flow:
         seq = tuple(t.action_norm_signature for t in path)
@@ -210,6 +216,7 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
             # nothing to "resume". See Flow.resumable's own docstring
             # for which BLOCKED reasons qualify and why.
             resumable=resumable and status == FlowStatus.BLOCKED,
+            origin_note=origin_note,
         )
         next_flow_id[0] += 1
         run.flows.append(flow)
@@ -608,7 +615,8 @@ def resume_flow(run: RunResult, flow: Flow, limit_overrides: dict, credentials: 
 
             _run_dfs(browser, config, run, credentials, flow.persona, stack, next_flow_id,
                      max_depth, max_breadth, max_states, max_flows, max_action_repeat, allow_mutating,
-                     states_before, flows_before, False, seq_to_flow_id, revisit_history)
+                     states_before, flows_before, False, seq_to_flow_id, revisit_history,
+                     origin_note=f"Resumed from flow #{flow.id}")
         finally:
             browser.close()
 
@@ -757,12 +765,14 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
             last.to_fp = new_fp
             last.response_status = response_status
 
+            combo_note = "Set via a user-specified parameter combination"
             if new_fp in run.states:
                 last.outcome = "revisit"
                 flow = Flow(
                     id=next_flow_id[0], status=FlowStatus.UNIQUE, duplicate_of=None,
                     dedup_reason="User-specified parameter combination -- reached an already-known state",
                     transitions=combo_path, end_state_fp=new_fp, persona=persona_name,
+                    origin_note=combo_note,
                 )
                 run.flows.append(flow)
             else:
@@ -777,6 +787,7 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
                     id=next_flow_id[0], status=FlowStatus.UNIQUE, duplicate_of=None,
                     dedup_reason="User-specified parameter combination -- newly discovered state",
                     transitions=combo_path, end_state_fp=new_fp, persona=persona_name,
+                    origin_note=combo_note,
                 )
                 run.flows.append(flow)
                 next_flow_id[0] += 1
@@ -793,7 +804,8 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
 
                 _run_dfs(browser, config, run, credentials, persona_name, stack, next_flow_id,
                          max_depth, max_breadth, max_states, max_flows, max_action_repeat, allow_mutating,
-                         states_before, flows_before, False, seq_to_flow_id, revisit_history)
+                         states_before, flows_before, False, seq_to_flow_id, revisit_history,
+                         origin_note="Continued after testing a parameter combination")
         finally:
             browser.close()
 

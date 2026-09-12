@@ -174,6 +174,19 @@ class Flow:
     # action ... raised an error") -- the action itself failed, more
     # budget doesn't fix that.
     resumable: bool = False
+    # Empty for a flow discovered during a normal crawl pass -- set to a
+    # short human-readable note only for a flow an operator action
+    # produced afterward (resume_flow(), resume_all_blocked_in_run(), or
+    # explore_combination()), e.g. "Resumed from flow #5" or "Continued
+    # after testing a parameter combination". Purely informational (like
+    # dedup_reason) -- added directly from a live report: an operator ran
+    # "Resume all blocked flows" on 12 flows, it genuinely worked (98 new
+    # flows, 11 of them newly unique), but nothing in the report said
+    # WHICH flows were the result, so from the outside it looked
+    # indistinguishable from having done nothing at all. This is what a
+    # reader actually needs to find them again without re-deriving which
+    # ids are new from a diff.
+    origin_note: str = ""
 
     def action_sequence(self) -> list[str]:
         return [t.action_norm_signature for t in self.transitions]
@@ -250,7 +263,7 @@ class RunResult:
                 id=f["id"], status=FlowStatus(f["status"]), duplicate_of=f.get("duplicate_of"),
                 dedup_reason=f.get("dedup_reason", ""), transitions=transitions,
                 end_state_fp=f.get("end_state_fp", ""), persona=f.get("persona", "default"),
-                resumable=f.get("resumable", False),
+                resumable=f.get("resumable", False), origin_note=f.get("origin_note", ""),
             ))
         for c in d.get("checkpoints", []):
             run.checkpoints.append(Checkpoint(**c))
