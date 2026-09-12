@@ -9,6 +9,8 @@ import json
 import re
 from urllib.parse import urlsplit
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 from .fingerprint import normalize_signature
 from .models import ElementCandidate, Risk
 from .risk import classify
@@ -86,6 +88,31 @@ _DISCOVER_JS = r"""
         return false;
     }
 
+    // A full-page fixed overlay (a modal/dialog backdrop) blocks
+    // EVERYTHING outside itself, regardless of on/off-screen status --
+    // found live on a real production crawl: a "Sign In" click opened
+    // an "Account Access" modal, and a background link far below the
+    // fold got promoted as a normal candidate anyway, because the
+    // per-candidate occlusion check just below only ever runs for
+    // on-screen elements (elementFromPoint can't assess a point
+    // outside the current viewport) -- it assumes scrolling to an
+    // off-screen element will make it reachable, which is exactly
+    // wrong for a FIXED overlay: it stays pinned over the viewport at
+    // any scroll position, so scrolling never uncovers what's behind
+    // it. Every later replay of that "candidate" failed the exact same
+    // way, indistinguishable from ordinary slowness until inspected
+    // directly (a screenshot showing the modal, taken mid-investigation).
+    function findBlockingOverlay() {
+        for (const el of document.querySelectorAll('body *')) {
+            const style = getComputedStyle(el);
+            if (style.position !== 'fixed' || style.display === 'none' || style.visibility === 'hidden') continue;
+            const r = el.getBoundingClientRect();
+            if (r.width >= vw * 0.9 && r.height >= vh * 0.9) return el;
+        }
+        return null;
+    }
+    const blockingOverlay = findBlockingOverlay();
+
     const candidates = nodes.filter(n => {
         const r = n.getBoundingClientRect();
         const style = getComputedStyle(n);
@@ -127,6 +154,12 @@ _DISCOVER_JS = r"""
             atPoint = document.elementFromPoint(cx, cy);
             occluded = !atPoint || !(n.contains(atPoint) || atPoint.contains(n));
         }
+        // Applies regardless of inViewport above -- see
+        // findBlockingOverlay's own comment for why the on-screen-only
+        // check above can't catch this on its own.
+        if (blockingOverlay && !blockingOverlay.contains(n)) {
+            occluded = true;
+        }
         // Extra signals for classifying *what kind* of menu a toggle opens
         // (hamburger / sidebar / dropdown / ...), since a lot of UI
         // libraries encode that in the id/class rather than ARIA. Where a
@@ -159,7 +192,10 @@ _DISCOVER_JS = r"""
             type: (n.getAttribute('type') || '').toLowerCase(),
             inForm: !!n.closest('form'),
             occluded: occluded,
-            occludedBy: occluded && atPoint ? (atPoint.className || atPoint.tagName || '').toString().slice(0, 60) : '',
+            occludedBy: occluded
+                ? (atPoint ? (atPoint.className || atPoint.tagName || '').toString().slice(0, 60)
+                            : (blockingOverlay ? 'a full-page overlay/modal (' + blockingOverlay.tagName + ')' : ''))
+                : '',
             className: (n.className || '').toString().slice(0, 120),
             ariaLabel: n.getAttribute('aria-label') || '',
             ariaHasPopup: n.getAttribute('aria-haspopup') || '',
@@ -249,7 +285,12 @@ _DISCOVER_JS = r"""
                    || (el.querySelector('img[alt]') || {}).alt || el.getAttribute('title') || ''),
             type: (el.getAttribute('type') || '').toLowerCase(),
             inForm: !!el.closest('form'),
-            occluded: false, occludedBy: '',
+            // Same full-page-overlay reasoning as the main candidates
+            // above -- a div-as-button element behind an open modal is
+            // just as unreachable as an <a>/<button> would be.
+            occluded: !!(blockingOverlay && !blockingOverlay.contains(el)),
+            occludedBy: (blockingOverlay && !blockingOverlay.contains(el))
+                ? ('a full-page overlay/modal (' + blockingOverlay.tagName + ')') : '',
             className: cls.slice(0, 120),
             ariaLabel: el.getAttribute('aria-label') || '',
             ariaHasPopup: el.getAttribute('aria-haspopup') || '',
@@ -1033,7 +1074,8 @@ def perform_action(page, el_meta: dict, credentials: dict,
             )
         holder, remove = _capture_nav_status(page)
         try:
-            loc.select_option(value=el_meta["selectValue"], timeout=timeout_ms)
+            _click_with_occlusion_retry(
+                lambda t: loc.select_option(value=el_meta["selectValue"], timeout=t), timeout_ms)
             try:
                 page.wait_for_load_state("load", timeout=timeout_ms)
             except Exception:
@@ -1052,7 +1094,7 @@ def perform_action(page, el_meta: dict, credentials: dict,
         )
     holder, remove = _capture_nav_status(page)
     try:
-        loc.click(timeout=timeout_ms)
+        _click_with_occlusion_retry(lambda t: loc.click(timeout=t), timeout_ms)
         try:
             page.wait_for_load_state("load", timeout=timeout_ms)
         except Exception:
@@ -1127,6 +1169,64 @@ def _wait_until_unoccluded(page, loc, max_wait_ms: int = 2000, poll_interval_ms:
         if i < attempts - 1:
             page.wait_for_timeout(poll_interval_ms)
     return blocker
+
+
+def _click_with_occlusion_retry(action_fn, timeout_ms: int) -> None:
+    """Calls `action_fn(this_timeout)` (a `loc.click(timeout=...)` or
+    `loc.select_option(timeout=...)` closure), retrying when -- and
+    only when -- Playwright's own failure explicitly says something
+    else is intercepting pointer events at the target (its exact
+    wording for this scenario, checked directly, not guessed at).
+    Total time spent across every attempt never exceeds `timeout_ms`,
+    the same overall budget a single un-retried call would have used:
+    a genuinely slow (not occluded) page still gets its full timeout
+    in one shot the moment any attempt fails for a DIFFERENT reason.
+
+    Exists because `_wait_until_unoccluded`'s pre-click snapshot,
+    above, isn't enough on its own -- confirmed live, re-crawling
+    alternateqa.com a second time with that fix already in place: the
+    exact same failure recurred, unchanged, because the covering
+    element (a button inside what reads like an onboarding/API-key
+    prompt) appeared as a direct RESULT of the click's own
+    scroll-into-view step, not before it even started. A snapshot
+    taken beforehand cannot see that; only re-running the whole
+    action -- which redoes Playwright's own scroll + actionability
+    checks from scratch -- can.
+
+    First attempt is a short probe (capped at 1500ms) specifically so
+    a PERSISTENT occlusion (an onboarding modal that never goes away
+    this session) is detected quickly rather than only after an
+    entire full-length attempt already burned most of the budget. If
+    that specific failure is occlusion-shaped, further short probes
+    keep retrying (giving a transient overlay -- a toast, a brief
+    animation -- real chances to clear) until the budget runs out, at
+    which point the last attempt's own TimeoutError (Playwright's own
+    rich diagnosis, naming what's actually on top) propagates
+    unchanged -- no custom message invented here to replace it."""
+    probe_ms = min(1500, timeout_ms)
+    remaining = timeout_ms - probe_ms
+    try:
+        action_fn(probe_ms)
+        return
+    except PlaywrightTimeoutError as first_exc:
+        if "intercepts pointer events" not in str(first_exc):
+            # Not occlusion -- one final attempt with the rest of the
+            # original budget, same total time a single un-retried
+            # call would have spent, so a merely-slow element isn't
+            # shortchanged by the shorter first probe above.
+            if remaining <= 0:
+                raise
+            action_fn(remaining)
+            return
+        while remaining > 0:
+            this_timeout = min(probe_ms, remaining)
+            remaining -= this_timeout
+            try:
+                action_fn(this_timeout)
+                return
+            except PlaywrightTimeoutError as exc:
+                if "intercepts pointer events" not in str(exc) or remaining <= 0:
+                    raise
 
 
 def current_domain(url: str) -> str:

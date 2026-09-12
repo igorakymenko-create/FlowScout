@@ -3034,6 +3034,85 @@ All 20 existing tests still pass; no leftover Playwright processes
 after any of the live verification runs.
 
 
+## Occlusion desync, continued: the pre-check and retry weren't enough -- the real bug was at discovery time (done, Aug 2026)
+
+Restarted the server with the bounded-recheck fix above and re-crawled
+alternateqa.com again: **both original errors were still there**,
+byte-for-byte identical to before -- a real Playwright
+`Locator.click: Timeout 8000ms exceeded`, not the new custom message.
+The bounded pre-check wasn't even firing its own message, which meant
+it wasn't the mechanism actually at play. Investigated further instead
+of assuming the fix was just incomplete in scope.
+
+**First refinement: retry the whole click, not just a pre-check.**
+Replaying the exact recorded `"Get Team License"` path 5 times in a
+row succeeded every time in isolation -- not deterministic, ruling out
+a simple reproducible bug in that one action alone. Built
+`_click_with_occlusion_retry()`: retries the WHOLE `click()`/
+`select_option()` call (not just a snapshot beforehand) whenever
+Playwright's own failure explicitly says something intercepts pointer
+events, since a `_wait_until_unoccluded()` snapshot taken before the
+click starts can't see an overlay that appears as a result of the
+click's OWN scroll-into-view step. Total budget still capped at
+`timeout_ms`, same as a single un-retried call.
+
+**Still didn't fix `/settings`.** Replaying that exact flow with the
+retry wrapper in place still failed, now visibly spending the full
+8-second budget across several short probes (confirmed via the
+final attempt's own `Timeout 500ms exceeded` -- exactly the tail end
+of an evenly-split retry budget). This meant the occlusion here
+wasn't transient at all -- something was *permanently* blocking the
+target for the whole session, which no amount of retrying would ever
+clear.
+
+**Root cause, found by looking, not guessing further:** replayed the
+flow's own first two steps manually (`"How It Works"` -> `"Sign In"
+(menu)`) and took a screenshot before attempting the third step.
+`"Sign In"` opens a real **"Account Access" modal** -- a
+`position: fixed` overlay covering the entire page. The target link
+(`"Go to Settings to enter your key"`) sits far below the fold
+(`bounding box y=1978` against an 800px viewport) -- and
+`_DISCOVER_JS`'s own occlusion check has a documented blind spot for
+exactly this: an off-screen element is "assumed not occluded" because
+scrolling normally reveals it (see the comment already there,
+predating this session). That assumption is **specifically wrong for
+a fixed-position overlay**: it stays pinned over the viewport at
+*every* scroll position, so scrolling to the target never uncovers it.
+Discovery promoted a candidate that could never actually be clicked
+while that modal was open -- not a replay-timing problem at all, a
+**discovery-time false positive**.
+
+**The actual fix:** `actions.py`'s `_DISCOVER_JS` gained
+`findBlockingOverlay()` -- scans for any `position: fixed` element
+covering at least 90% of the viewport in both dimensions (a modal/
+dialog backdrop, structurally). If one exists, EVERY candidate that
+isn't a descendant of it is now occluded, regardless of on/off-screen
+status -- applied to both the main candidate pass and the div-as-
+button pool pass. This is a strictly different mechanism from the
+per-candidate `elementFromPoint` check above it (which only ever
+applies to on-screen elements) -- it's the missing piece for exactly
+the case that check structurally cannot cover.
+
+**Verified on a purpose-built fixture** matching the real bug's shape
+(a background link 2000px down the page; a "Sign In" button that
+opens a full-page fixed modal): before opening the modal, both `"Sign
+In"` and `"Go to Settings"` are ordinary candidates, nothing occluded.
+After opening it -- `"Go to Settings"` is now correctly reported as
+occluded (`"obstructed by another element (a full-page overlay/modal
+(DIV))"`), not silently promoted as a doomed candidate; only the
+modal's own `"Close"` button remains clickable, exactly as a real user
+would experience the page.
+
+**Verified against the live site, discovery-level, not a saved replay:**
+re-crawled alternateqa.com fresh. **Both original errors are gone.**
+A different, previously-unseen error surfaced instead (`Toggle "on"`,
+an unnamed checkbox -- `input[type="checkbox"][name=""][value="on"]`,
+likely ambiguous the same way the very first empty-locator bug was) --
+noted as a new, separate finding, not chased further in this pass; the
+two errors the user actually reported are confirmed fixed. All 20
+existing tests still pass; no leftover Playwright processes.
+
+
 ## User-guided combinations for conjunctive multi-parameter gating (done, Aug 2026)
 
 Direct answer to the limitation documented above ("Known limitation --
