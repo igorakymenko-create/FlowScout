@@ -2989,19 +2989,49 @@ realistic stand-in for replay overhead or other candidates tried
 first from the same state) something else had appeared and now blocks
 the click. Root cause confirmed, not just theorized.
 
-**Proposed fix, not yet built** (this pass was investigation only, at
-the user's own explicit request): re-check occlusion right before the
-click/select_option call, with a short bounded grace period (well
-under the full `action_timeout_ms`) for a transient overlay to clear;
-if it's still occluded after that, withhold the action with a clear,
-specific reason ("became covered by an unexpected overlay between
-discovery and this replay") instead of burning the full timeout on a
-doomed click. Zero behavior change for the unoccluded/success path.
-Left unbuilt deliberately -- doing it right needs its own
-live-verified pass to make sure the bounded-retry design doesn't trade
-this false negative for new false positives elsewhere (e.g. a
-legitimately slow-to-render page that just needs the full timeout
-regardless).
+**Built in a later session turn** (this pass was investigation only at
+first, at the user's own explicit request; the fix below followed once
+the SAME class of failure recurred live -- `/academy` again, plus a
+second real one on the same site, `"Get Team License"`, that hadn't
+been root-caused before):
+
+`actions.py`'s new `_wait_until_unoccluded(page, loc, max_wait_ms=2000,
+poll_interval_ms=150)`: re-runs the exact same `elementFromPoint`
+occlusion test `_DISCOVER_JS` already does at discovery time, right
+before `perform_action()`'s `click()`/`select_option()` call. Not a
+guess about WHERE things went wrong -- the same check, just asked
+again, later. Steps aside (returns "not occluded") for anything it
+isn't this function's call to decide: a locator that doesn't resolve
+to exactly one attached element, or one currently off-screen -- both
+cases let `click()`/`select_option()` raise their own more specific
+error instead. If genuinely still occluded, polls every 150ms up to a
+grace period capped at `min(2000, timeout_ms)` -- long enough for a
+transient toast/animation to clear, short enough that a persistent
+overlay (an onboarding modal that never goes away this session) fails
+FAST instead of burning the whole click timeout. On timeout, raises a
+plain `RuntimeError` naming what's on top (`"element became covered by
+'DIV' between discovery and this replay (waited 2000ms for it to
+clear) -- not attempted"`) instead of an opaque Playwright stack
+trace -- flows through `_run_path()`'s existing error-checkpoint path
+completely unchanged, no crawler.py changes needed at all.
+
+**Verified live, three scenarios, not just the happy path:**
+- **Reproduced the original bug's exact fixture again**, now WITH the
+  fix: failed in **1.9s** (down from the full 3.0s timeout before),
+  with the new clear message -- same failure, caught much faster and
+  explained instead of a raw stack trace.
+- **A transient-overlay fixture** (appears at 900ms, clears again at
+  1400ms): the click **succeeded in 0.5s**, correctly waiting out the
+  overlay within the grace period rather than giving up the instant it
+  saw ANY occlusion -- confirms the bounded retry does its job, not
+  just the fast-fail half.
+- **Regression check on an ordinary, never-occluded crawl** (the same
+  conjunctive-gating fixture from above): identical shape to before
+  the fix -- 4 flows, 0 checkpoints, 2.3s total -- confirming the extra
+  recheck adds no meaningful overhead to the common, unoccluded case.
+
+All 20 existing tests still pass; no leftover Playwright processes
+after any of the live verification runs.
 
 
 ## User-guided combinations for conjunctive multi-parameter gating (done, Aug 2026)

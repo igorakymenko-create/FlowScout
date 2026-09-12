@@ -1017,10 +1017,20 @@ def perform_action(page, el_meta: dict, credentials: dict,
     a known-slow site without patching code; 8000 stays the default,
     identical to every crawl run before this existed."""
     loc = build_locator(page, el_meta)
+    # Bounded occlusion recheck (Aug 2026), same grace period for both
+    # branches below -- see _wait_until_unoccluded's own docstring for
+    # why this exists and why it's capped well under timeout_ms.
+    occlusion_grace_ms = min(2000, timeout_ms)
     if el_meta.get("tag") == "select":
         # build_locator resolves the <select> itself (via its own
         # dataTest/id) -- select_option targets the value recorded at
         # discovery time, not whatever happens to be selected on replay.
+        blocker = _wait_until_unoccluded(page, loc, max_wait_ms=occlusion_grace_ms)
+        if blocker:
+            raise RuntimeError(
+                f"element became covered by {blocker!r} between discovery and this replay "
+                f"(waited {occlusion_grace_ms}ms for it to clear) -- not attempted"
+            )
         holder, remove = _capture_nav_status(page)
         try:
             loc.select_option(value=el_meta["selectValue"], timeout=timeout_ms)
@@ -1034,6 +1044,12 @@ def perform_action(page, el_meta: dict, credentials: dict,
         return None, {}, holder["status"]
     fill_summary = fill_enclosing_form(page, el_meta, credentials)
     choice_state = _read_choice_state(page, el_meta)
+    blocker = _wait_until_unoccluded(page, loc, max_wait_ms=occlusion_grace_ms)
+    if blocker:
+        raise RuntimeError(
+            f"element became covered by {blocker!r} between discovery and this replay "
+            f"(waited {occlusion_grace_ms}ms for it to clear) -- not attempted"
+        )
     holder, remove = _capture_nav_status(page)
     try:
         loc.click(timeout=timeout_ms)
@@ -1045,6 +1061,72 @@ def perform_action(page, el_meta: dict, credentials: dict,
     finally:
         remove()
     return fill_summary, choice_state, holder["status"]
+
+
+_OCCLUSION_CHECK_JS = """(el) => {
+    const r = el.getBoundingClientRect();
+    const vw = window.innerWidth || document.documentElement.clientWidth;
+    const vh = window.innerHeight || document.documentElement.clientHeight;
+    const inViewport = r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw;
+    if (!inViewport) return {occluded: false, blocker: ''};
+    const left = Math.max(r.left, 0), right = Math.min(r.right, vw);
+    const top = Math.max(r.top, 0), bottom = Math.min(r.bottom, vh);
+    const cx = (left + right) / 2, cy = (top + bottom) / 2;
+    const atPoint = document.elementFromPoint(cx, cy);
+    const occluded = !atPoint || !(el.contains(atPoint) || atPoint.contains(el));
+    return {occluded, blocker: (occluded && atPoint) ? (atPoint.className || atPoint.tagName || '').toString().slice(0, 60) : ''};
+}"""
+
+
+def _wait_until_unoccluded(page, loc, max_wait_ms: int = 2000, poll_interval_ms: int = 150) -> str:
+    """Bounded recheck of the exact same occlusion test _DISCOVER_JS
+    already applies at discovery time (see actions.py's _DISCOVER_JS),
+    run again right before a click/select_option -- catches a modal,
+    toast, or onboarding overlay that appeared AFTER discovery but
+    before this replay reaches it (see ROADMAP.md "Discovery->click
+    occlusion desync", found live on a real production crawl: an
+    element correctly not occluded at discovery, then genuinely
+    covered by something else by the time a much-later replay step
+    finally got to it -- previously indistinguishable from any other
+    slow-to-load element, burning the FULL click timeout every time
+    before failing with an opaque Playwright stack trace).
+
+    Returns "" if the element is clear to click (immediately, or after
+    a transient overlay cleared within the grace period) -- including
+    when the locator can't be resolved to exactly one attached element
+    at all, or is currently off-screen: neither is this function's call
+    to make, so it steps aside and lets click()/select_option() raise
+    their own, more specific error instead of guessing here. Returns a
+    short description of whatever is still on top (its class or tag)
+    if the SAME point is still covered after the whole grace period --
+    the caller treats that as a fast, clearly-explained failure instead
+    of attempting a click already known to be doomed.
+
+    `max_wait_ms` is deliberately much shorter than the overall action
+    timeout (2000ms here vs. 8000ms+ for the click itself) -- long
+    enough to give a genuinely transient overlay (a toast, a brief
+    animation) a real chance to clear, short enough that a PERSISTENT
+    one (an onboarding modal that never goes away this session) fails
+    fast instead of wasting the whole budget on a doomed retry loop."""
+    try:
+        handle = loc.element_handle(timeout=500)
+    except Exception:
+        return ""
+    if handle is None:
+        return ""
+    attempts = max(1, max_wait_ms // poll_interval_ms)
+    blocker = ""
+    for i in range(attempts):
+        try:
+            result = page.evaluate(_OCCLUSION_CHECK_JS, handle)
+        except Exception:
+            return ""  # element detached mid-check or similar -- not this function's call either
+        if not result.get("occluded"):
+            return ""
+        blocker = result.get("blocker") or "an unknown element"
+        if i < attempts - 1:
+            page.wait_for_timeout(poll_interval_ms)
+    return blocker
 
 
 def current_domain(url: str) -> str:
