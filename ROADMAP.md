@@ -3210,3 +3210,80 @@ one state, and that's what got built; a genuinely cross-page version
 would need its own design (which page to navigate to between steps,
 how to resolve THAT page's own candidates) rather than reusing this
 one directly.
+
+
+## The "Toggle 'on'" checkbox bug: role="checkbox"/"radio" custom controls (done, Aug 2026)
+
+The `alternateqa.com` re-crawl above surfaced a fourth real error,
+noted but not chased at the time: `Toggle "on"`, an ambiguous locator
+(`input[type="checkbox"][name=""][value="on"]`) that could match any
+unnamed checkbox on the page. Investigated on request, live, rather
+than guessing at the mechanism.
+
+**Root cause**: this is the Register form's "Show password" toggle,
+built with a component library (Radix UI/shadcn -- judging by the
+class names). The REAL, visible, clickable control is a styled
+`<button role="checkbox" aria-checked="false" data-state="unchecked">`
+-- a native `<input type="checkbox">` sits alongside it purely for
+form semantics, and is deliberately non-interactive:
+`pointer-events: none; opacity: 0; transform: translateX(-100%)`.
+`_DISCOVER_JS`'s `isUsableInput()` checked width/height/visibility/
+display/disabled -- never `pointer-events` -- so it promoted the inert
+decoy as a normal checkbox candidate, guaranteed to time out on every
+click, while never even considering the real button (which the
+existing markup selector *does* match, being a plain `<button>`, but
+with nothing to reliably identify it -- see below).
+
+**This is a widespread pattern, not a one-off**, so the fix goes
+further than excluding the decoy: `_DISCOVER_JS` gained a new
+`role="checkbox"`/`role="radio"` discovery pass (skipping literal
+`<input>` elements, which the native loops already cover), reading
+`aria-checked`/`data-state` for current state and grouping radios by
+their nearest `role="radiogroup"` ancestor -- the same shape as the
+existing native radio/checkbox/select handling, `is_choice`,
+`choice_group` and all.
+
+**Label resolution -- a real complication, resolved by leaning on the
+browser instead of reimplementing it.** `inputLabelText()` (used for
+native radio/checkbox labels already) gained a last-resort fallback:
+a sibling `<label>` anywhere in the same parent, not just `label[for=id]`
+or a wrapping `<label>` -- needed because label association for these
+components isn't always a formal ARIA link. For the actual REPLAY
+locator, `build_locator()` doesn't try to reproduce the browser's own
+accessible-name computation in Python -- it asks Playwright's
+`get_by_role(role, name=...)` to do exactly that, again, at click time.
+Verified directly before relying on it: `get_by_role("checkbox",
+name="Show password")` found the element on the live site with zero
+matches otherwise achievable via plain CSS, and a subsequent `.click()`
+correctly flipped `data-state` from `"unchecked"` to `"checked"`.
+(In practice this element also had a real `id` -- `build_locator()`'s
+existing id-based branch fires first and is simpler still; `get_by_role`
+is the fallback for when no data-test/id exists at all, which does
+happen on other sites/elements.)
+
+**Same "no reliable locator" guard as the earlier button/link fix,
+applied here too**: if a role-checkbox/role-radio has no data-test, no
+id, AND no resolvable accessible name, it's reported the same way an
+occluded candidate already is -- never built into a candidate that
+would resolve `get_by_role(name="")` against literally any checkbox on
+the page, which would just be the exact same class of bug in a new
+shape.
+
+**Verified live, end to end:**
+- Direct discovery + replay on the real Register form: `"Show
+  password"` correctly discovered as `tag: "role-checkbox"`,
+  `is_choice=True`, `choice_group="show-password-register"`, labeled
+  `"Show password"` (not a generic/empty label). `perform_action()`
+  clicked it for real -- `data-state` went from `"unchecked"` to
+  `"checked"`.
+- **Full re-crawl of alternateqa.com: zero errors.** All three
+  originally-reported failures (`/academy`, `"Get Team License"`, and
+  this checkbox) are gone in the same run -- 11 states, 15 flows, only
+  the expected `max_flows` budget checkpoint, nothing else.
+- Regression check on the conjunctive-gating fixture (plain native
+  checkboxes/select, no component library involved): identical shape
+  to before -- 4 flows, 0 checkpoints, ~2.2s -- confirming the new
+  role-based pass doesn't affect ordinary native-input discovery at all.
+
+All 20 existing tests still pass; no leftover Playwright processes
+after any of the live verification runs.

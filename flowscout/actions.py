@@ -362,6 +362,14 @@ _DISCOVER_JS = r"""
 
     // Radio/checkbox labels live on a sibling <label>, not the input
     // itself -- an <input type=radio> has no text content of its own.
+    // Falls all the way to a sibling <label> anywhere in the same
+    // parent as a last resort (added alongside role-checkbox/role-radio
+    // support below) -- found live that a component library (Radix/
+    // shadcn's Checkbox) can render a <label> next to a control with a
+    // `for` attribute that doesn't even match anything (a decoy hidden
+    // input has no id at all), so neither the for/id nor the
+    // wrapping-label lookup above finds it, even though a human reading
+    // the page would obviously associate the two.
     function inputLabelText(el) {
         if (el.id) {
             const lbl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
@@ -369,13 +377,31 @@ _DISCOVER_JS = r"""
         }
         const wrapping = el.closest('label');
         if (wrapping) return firstBlockText(wrapping.innerText || '');
-        return firstBlockText(el.getAttribute('aria-label') || el.value || '');
+        if (el.getAttribute('aria-label') || el.value) {
+            return firstBlockText(el.getAttribute('aria-label') || el.value || '');
+        }
+        if (el.parentElement) {
+            const siblingLabel = el.parentElement.querySelector('label');
+            if (siblingLabel) return firstBlockText(siblingLabel.innerText || '');
+        }
+        return '';
     }
     function isUsableInput(el) {
         const r = el.getBoundingClientRect();
         const style = getComputedStyle(el);
+        // pointerEvents check (Aug 2026): found live on a real crawl --
+        // a component library (Radix/shadcn's Checkbox) renders the
+        // REAL interactive control as a styled <button role="checkbox">
+        // and keeps a native <input type=checkbox> alongside it purely
+        // for form semantics, deliberately non-interactive
+        // (pointer-events:none, opacity:0, translated off-screen).
+        // Every one of the other checks here already passed for that
+        // decoy (nonzero size, not display:none, not .disabled) -- only
+        // pointer-events catches it. Clicking it was structurally
+        // guaranteed to time out: Playwright correctly waits forever
+        // for an element to become "actionable" that never can be.
         return !(r.width <= 0 || r.height <= 0 || style.visibility === 'hidden'
-                 || style.display === 'none' || el.disabled);
+                 || style.display === 'none' || el.disabled || style.pointerEvents === 'none');
     }
 
     // Radio groups: "pick one of N" is structurally the same choice a
@@ -434,7 +460,62 @@ _DISCOVER_JS = r"""
         });
     }
 
-    return {candidates, pool, legacyUnclassified, selects, radios, checkboxes};
+    // role="checkbox"/role="radio" custom controls (Radix/shadcn/
+    // Headless-UI style component libraries, extremely common in
+    // current React apps): the REAL, visible, clickable element is
+    // often a styled <button role="checkbox"> (or a <div role="radio">
+    // inside a role="radiogroup"), not a native <input> at all -- a
+    // native input, if present alongside it, exists purely for form
+    // semantics and is deliberately non-interactive (see
+    // isUsableInput's own pointerEvents check above, which excludes
+    // exactly that decoy). `[role="checkbox"]`/`[role="radio"]` on a
+    // literal <input> is skipped here -- those are already covered by
+    // the native loops above, role attribute or not.
+    //
+    // Label resolution is JS-side best-effort only, used for THIS
+    // candidate's display text and signature -- actually relocating it
+    // on replay (actions.py's build_locator) asks Playwright's own
+    // get_by_role(role, name=...) to compute the real accessible name
+    // again, which is more reliable than reimplementing that
+    // computation here. Verified live: Playwright's own accessible-name
+    // resolution reached a sibling <label> with no formal
+    // aria-labelledby/for wiring at all on a real Radix Checkbox
+    // (alternateqa.com's "Show password" toggle) -- inputLabelText's
+    // sibling-<label> fallback mirrors that specifically so the label
+    // captured here has a good chance of matching what get_by_role
+    // will actually find.
+    const roleControls = [];
+    for (const el of document.querySelectorAll('[role="checkbox"], [role="radio"]')) {
+        if (el.tagName === 'INPUT') continue;
+        if (!isUsableInput(el)) continue;
+        const role = el.getAttribute('role');
+        const checked = el.getAttribute('aria-checked') === 'true' || el.getAttribute('data-state') === 'checked';
+        const name = inputLabelText(el) || el.getAttribute('title') || '';
+        let group = '__ungrouped_role_checkbox';
+        if (role === 'radio') {
+            const groupEl = el.closest('[role="radiogroup"]');
+            group = groupEl
+                ? (groupEl.getAttribute('data-test') || groupEl.id || groupEl.getAttribute('aria-label') || 'radiogroup')
+                : `__ungrouped_${roleControls.length}`;
+        }
+        roleControls.push({
+            tag: role === 'radio' ? 'role-radio' : 'role-checkbox',
+            dataTest: el.getAttribute('data-test') || el.getAttribute('data-testid') || '',
+            id: el.id || '',
+            href: '',
+            text: name,
+            type: role === 'radio' ? 'role-radio-choice' : 'role-checkbox-toggle',
+            inForm: !!el.closest('form'),
+            occluded: false, occludedBy: '',
+            className: (el.className || '').toString().slice(0, 120),
+            ariaLabel: el.getAttribute('aria-label') || '',
+            ariaHasPopup: '', ariaExpandedSet: false,
+            ariaControls: '', controlledTag: '', controlledClass: '',
+            roleAccessibleName: name, roleChecked: checked, roleGroup: group,
+        });
+    }
+
+    return {candidates, pool, legacyUnclassified, selects, radios, checkboxes, roleControls};
 }
 """
 
@@ -499,6 +580,11 @@ def describe_action(el_meta: dict, fill_summary: dict | None) -> str:
         group = el_meta.get("radioGroup", "").lstrip("_") or "options"
         return f'Select "{text}" in "{group}"'
     if el_meta.get("tag") == "checkbox":
+        return f'Toggle "{text}"'
+    if el_meta.get("tag") == "role-radio":
+        group = (el_meta.get("roleGroup") or "").lstrip("_") or "options"
+        return f'Select "{text}" in "{group}"'
+    if el_meta.get("tag") == "role-checkbox":
         return f'Toggle "{text}"'
     base = f'Open "{text}"' if el_meta.get("tag") == "a" else f'Click "{text}"'
     kind = classify_menu_kind(el_meta)
@@ -718,6 +804,67 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
             is_choice=True, choice_group=base,
         ), None
 
+    if el.get("tag") == "role-checkbox":
+        # Same shape as the native "checkbox" branch above -- one toggle
+        # action, is_choice=True for the same identity reason -- but the
+        # element is a role="checkbox" custom control (Radix/shadcn
+        # style), not a native <input>, so there's no name/value pair to
+        # lean on; roleAccessibleName (JS-side best-effort label lookup,
+        # see _DISCOVER_JS) is the identifying "value" instead.
+        base = el["dataTest"] or el["id"] or el["roleAccessibleName"]
+        if not base:
+            # Mirrors the generic "no reliable locator" guard below --
+            # without data-test/id/accessible name, build_locator()'s
+            # own get_by_role(name="") fallback would match ANY checkbox
+            # with no name at all, the exact class of bug this whole
+            # feature exists to fix, not reproduce for a new element shape.
+            return None, {
+                "label": describe_action(el, None),
+                "reason": "no reliable locator for this checkbox (no data-test/id/accessible name) "
+                          "-- skipped rather than risk clicking the wrong element",
+            }
+        signature = f"role-checkbox-toggle:{base}:{el['roleChecked']}"
+        if signature in seen:
+            return None, None
+        seen.add(signature)
+        label = el["roleAccessibleName"] or el["dataTest"] or el["id"] or "checkbox"
+        norm_signature = normalize_signature(f"choice-{base}-{el['roleChecked']}")
+        risk, reason = classify(label, None, current_domain, allowed_domains, exclude_patterns)
+        return ElementCandidate(
+            signature=signature, norm_signature=norm_signature, label=label,
+            selector=json.dumps(el), risk=risk, risk_reason=reason, discovered_via=via,
+            is_choice=True, choice_group=base,
+        ), None
+
+    if el.get("tag") == "role-radio":
+        # Same shape as the native "radio" branch above -- group name
+        # (roleGroup, from the nearest role="radiogroup" ancestor, or an
+        # __ungrouped_N fallback) plus the specific option picked.
+        # roleGroup alone never identifies which SPECIFIC option this is
+        # on replay though -- that still needs data-test/id/accessible
+        # name, same reasoning as role-checkbox above.
+        base = el["dataTest"] or el["id"] or el["roleGroup"]
+        name = el["roleAccessibleName"]
+        if not (el["dataTest"] or el["id"] or name):
+            return None, {
+                "label": describe_action(el, None),
+                "reason": "no reliable locator for this radio option (no data-test/id/accessible name) "
+                          "-- skipped rather than risk clicking the wrong element",
+            }
+        value_key = name or el["dataTest"] or el["id"]
+        signature = f"role-radio-choice:{base}:{value_key}"
+        if signature in seen:
+            return None, None
+        seen.add(signature)
+        label = name or el["dataTest"] or el["id"] or "option"
+        norm_signature = normalize_signature(f"choice-{base}-{value_key}")
+        risk, reason = classify(label, None, current_domain, allowed_domains, exclude_patterns)
+        return ElementCandidate(
+            signature=signature, norm_signature=norm_signature, label=label,
+            selector=json.dumps(el), risk=risk, risk_reason=reason, discovered_via=via,
+            is_choice=True, choice_group=base,
+        ), None
+
     sig_key = el["dataTest"] or el["id"] or f"{el['tag']}:{el['text']}"
     signature = f"data-test:{sig_key}" if el["dataTest"] else (
         f"id:{sig_key}" if el["id"] else f"text:{sig_key}"
@@ -791,6 +938,13 @@ def discover_candidates(page, current_domain: str, allowed_domains: list[str],
     # (mirrors "select"), so the flag here is a don't-care placeholder.
     formal += [(el, "markup", False) for el in payload.get("radios", [])]
     formal += [(el, "markup", False) for el in payload.get("checkboxes", [])]
+    # role="checkbox"/role="radio" custom controls (Radix/shadcn-style
+    # component libraries) -- same "markup-matched, not CDP-verified"
+    # reasoning as radios/checkboxes above, found by role attribute
+    # instead of a native input tag. See _DISCOVER_JS's own comment for
+    # why this exists (a native <input> alongside these is often a
+    # deliberately non-interactive decoy for form semantics only).
+    formal += [(el, "markup", False) for el in payload.get("roleControls", [])]
     pool = payload["pool"]
 
     unclassified: list[dict] = []
@@ -855,6 +1009,18 @@ def build_locator(page, el_meta: dict):
         return page.locator(
             f'input[type="checkbox"][name="{el_meta["checkboxName"]}"][value="{el_meta["checkboxValue"]}"]'
         ).first
+    if el_meta.get("tag") in ("role-checkbox", "role-radio"):
+        # No data-test/id (handled above already) -- fall back to
+        # Playwright's own accessible-name resolution via get_by_role(),
+        # the same mechanism that actually located this element
+        # correctly on a real site (a Radix/shadcn Checkbox with no
+        # data-test/id at all, and no formal aria-labelledby/for wiring
+        # to its own sibling <label> either -- verified live: get_by_role
+        # found it anyway, and a subsequent .click() correctly toggled
+        # its aria-checked/data-state, which raw CSS never could have).
+        role = "checkbox" if el_meta["tag"] == "role-checkbox" else "radio"
+        name = el_meta.get("roleAccessibleName") or el_meta.get("text") or ""
+        return page.get_by_role(role, name=name, exact=True).first
     if el_meta.get("href"):
         return page.locator(f'{el_meta["tag"]}[href="{el_meta["href"]}"]').first
     return page.get_by_text(el_meta["text"], exact=True).first
@@ -891,8 +1057,9 @@ def fill_enclosing_form(page, el_meta: dict, credentials: dict) -> dict | None:
     masked for password fields) so the report can say what was filled,
     which matters most for login steps.
     """
-    if not el_meta.get("inForm") or el_meta.get("type") in ("button", "select-option",
-                                                               "radio-choice", "checkbox-toggle"):
+    if not el_meta.get("inForm") or el_meta.get("type") in (
+            "button", "select-option", "radio-choice", "checkbox-toggle",
+            "role-radio-choice", "role-checkbox-toggle"):
         return None
     target = build_locator(page, el_meta)
     form = target.locator("xpath=ancestor::form[1]")
