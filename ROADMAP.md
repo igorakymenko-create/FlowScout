@@ -3570,3 +3570,62 @@ of an ever-growing flow list into 1 -- a meaningful cut to how fast one
 "Resume all" click can burn through the free tier's daily allowance,
 though not a substitute for raising the tier or reducing how often
 dedup needs to run at all if usage keeps growing.
+
+
+## Blocked flows that were successfully resumed now change status (done, Aug 2026)
+
+Direct follow-up: "what's the point of a stale blocked flow sitting
+there forever" -- the user's own framing, not a euphemism. Two earlier
+fixes (`origin_note` badges, the delta summary) addressed *finding*
+the new flows a resume produced; this addresses the complaint at its
+actual root: an original blocked flow that's genuinely been continued
+past its own truncation point staying marked BLOCKED, resumable, and
+counted in "N blocked"/"Resume all" totals forever, indistinguishable
+from one nobody has ever touched.
+
+**Chosen design, from the user's own explicit answer, not guessed at:**
+the "N blocked" count and "Resume all" box should reflect the truth at
+the END of whatever just ran, not a number frozen at the original
+crawl. A flow that was blocked but has since been carried further
+successfully should change its own status and take its place among
+ordinary flows, not linger in a separate "still needs attention"
+bucket.
+
+**Built by reusing the EXISTING duplicate mechanism, not inventing a
+new status.** A truncated 3-step prefix is genuinely redundant once a
+fuller 5-step continuation exists -- the exact same relationship
+`_apply_state_convergence` already expresses between flows for an
+unrelated reason (shorter path superseded by a longer one to the same
+place). `crawler.py`'s `resume_flow()` now snapshots which flow ids
+exist before calling `_run_dfs()`; if the resume produced at least one
+new flow (a real result, not an immediate re-error or re-block),
+the ORIGINAL flow is reclassified: `status = DUPLICATE`,
+`duplicate_of` = whichever new flow went deepest, `resumable = False`,
+and `dedup_reason` names exactly which new flow(s) superseded it.
+`resumable = False` is what actually drops it out of future "N
+blocked"/"Resume all" counts, since both read live off `run.flows`,
+not a cached figure -- no separate bookkeeping needed. A resume that
+itself immediately re-blocks or errors leaves the original genuinely
+still blocked, correctly -- nothing to claim resolved there.
+
+Deliberately does NOT gate this on `run_semantic_dedup` -- it's a
+structural fact about the flow graph, unrelated to embeddings, so it
+runs on every resume_flow() call including every one inside a
+resume-all batch, independent of whichever single flow at the end
+actually runs the (now de-duplicated, single) semantic dedup pass.
+
+**Verified live, actual before/after flow lists, not just the delta
+number:** on the same 3-branch fixture used throughout this feature's
+testing -- all 3 originally blocked flows (`#1, #3, #5`) correctly
+came back `status=duplicate, resumable=False`, each with a
+`dedup_reason` naming its own specific successors (e.g. `"Resumed and
+superseded: continuing further produced 2 new flow(s) (#7, #8)"`).
+Separately confirmed the "Resume all" box in the regenerated
+`report.html` shows the CURRENT truth, not a frozen number: in this
+run, exploring further past the resolved originals hit a genuinely
+NEW, different dead end (the same action-repeat-cap fixture artifact
+already documented earlier in this file, not a bug) -- and the box
+correctly showed `"3 blocked flow(s) can be resumed"` for those three
+NEW ones, matching `sum(f.resumable for f in run.flows)` exactly,
+never the stale original three. All 20 existing tests still pass; no
+leftover Playwright processes.

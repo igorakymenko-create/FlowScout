@@ -615,6 +615,8 @@ def resume_flow(run: RunResult, flow: Flow, limit_overrides: dict, credentials: 
     seq_to_flow_id: dict[tuple, int] = {}
     revisit_history: set[str] = set()
 
+    flow_ids_before = {f.id for f in run.flows}
+
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         try:
@@ -631,6 +633,35 @@ def resume_flow(run: RunResult, flow: Flow, limit_overrides: dict, credentials: 
                      origin_note=f"Resumed from flow #{flow.id}")
         finally:
             browser.close()
+
+    # Reclassify the original blocked flow itself (Aug 2026), not just
+    # append new ones alongside it -- asked directly after a live
+    # report: a flow that's genuinely been continued past its own
+    # truncation point staying marked BLOCKED forever, still counted in
+    # "N blocked"/"Resume all" totals, read as if the resume had done
+    # nothing even when it demonstrably had (see ROADMAP.md). Reuses
+    # the EXISTING duplicate mechanism rather than inventing a new
+    # status: a truncated 3-step prefix is genuinely redundant once a
+    # fuller 5-step continuation exists, the same relationship
+    # `_apply_state_convergence` already expresses for unrelated
+    # reasons. `resumable=False` here is what actually drops it out of
+    # future "N blocked"/"Resume all" counts (both read live off
+    # run.flows, not a separate cached figure) -- only when THIS resume
+    # produced at least one real result; a resume that itself
+    # immediately re-blocked or errored leaves the original genuinely
+    # still blocked, nothing to claim otherwise.
+    new_flows = [f for f in run.flows if f.id not in flow_ids_before]
+    if new_flows:
+        best = max(new_flows, key=lambda f: len(f.transitions))
+        ids_str = ", ".join(f"#{f.id}" for f in sorted(new_flows, key=lambda f: f.id))
+        flow.status = FlowStatus.DUPLICATE
+        flow.duplicate_of = best.id
+        flow.resumable = False
+        flow.dedup_reason = (
+            f"Resumed and superseded: continuing further produced {len(new_flows)} new flow(s) "
+            f"({ids_str}) -- this shorter, truncated path is redundant now that the fuller "
+            f"exploration exists"
+        )
 
     sem_cfg = run.config.get("semantic_dedup", {})
     if run_semantic_dedup and sem_cfg.get("enabled", True):
