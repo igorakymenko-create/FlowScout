@@ -3629,3 +3629,76 @@ correctly showed `"3 blocked flow(s) can be resumed"` for those three
 NEW ones, matching `sum(f.resumable for f in run.flows)` exactly,
 never the stale original three. All 20 existing tests still pass; no
 leftover Playwright processes.
+
+
+## Forms without a `<form>` element, and `type="button"` submit controls (done, Aug 2026)
+
+Asked directly for a coverage audit: what classes of elements/scenarios
+does the crawler structurally miss? The highest-value finding, chosen
+to fix first: modern React/Vue apps very commonly build a "form" as a
+plain container (no `<form>` tag at all) with a submit control
+deliberately marked `type="button"` -- to suppress native submission,
+handled via JS instead. **Both halves of this pattern independently
+defeated form-filling before this fix**, found by reading the code
+rather than assumed:
+
+1. `inForm` (`_DISCOVER_JS`, all six candidate-gathering spots) was
+   `!!el.closest('form')` -- with no real `<form>` ancestor,
+   `fill_enclosing_form()`/`_read_choice_state()` both short-circuited
+   immediately (`if not el_meta.get("inForm"): return`), never even
+   attempting to fill anything.
+2. Separately, `fill_enclosing_form()` unconditionally excluded
+   `el_meta.get("type") == "button"` as "not a submission" (reasoning:
+   a `type="button"` inside a real form is very likely a Cancel/
+   decorative control). Correct when a real `<form>` exists -- wrong
+   when it doesn't, since `type="button"` is often the ONLY way such
+   an app marks its actual submit action.
+
+**Fixed both, verified each was independently necessary (fixing only
+one still failed the live test):**
+
+- `actions.py`'s `_DISCOVER_JS` gained `closestFormLike(el)`: tries a
+  real `<form>` ancestor first, falls back to the closest ancestor
+  that actually contains a real `input`/`select`/`textarea` -- capped
+  at 200 descendants so this can't walk all the way to `<body>` and
+  "find" the whole page as one giant form. Used at all six
+  `inForm:` assignment sites (replacing the bare `.closest('form')`).
+- New Python-side `_CLOSEST_FORM_LIKE_JS` + `_closest_form_like_handle()`
+  (same fallback logic, called via `element_handle.evaluate_handle()`
+  since this runs in a separate action-time call, not inside the one
+  big discovery script) -- `fill_enclosing_form()` and
+  `_read_choice_state()` both now resolve the target's real container
+  this way instead of Playwright's `xpath=ancestor::form[1]`, which
+  only ever matched a genuine `<form>` tag.
+- `fill_enclosing_form()`'s `type == "button"` exclusion is now
+  conditional: still excluded when the resolved container is a real
+  `<form>` (`container.evaluate("e => e.tagName.toLowerCase() ===
+  'form'")` -- the Cancel-button case, unchanged), no longer excluded
+  when it's a fallback container (no real `<form>` to make "Cancel" a
+  meaningful alternative to begin with).
+
+**Verified live, three fixtures, not just "it compiles":**
+- **The motivating case**: a `<div>` wrapping two inputs and a
+  `type="button"` submit, wired via `onclick` to navigate to
+  `/success` only if BOTH fields were non-empty at click time.
+  Before either fix: clicked with both fields empty, landed on
+  `/error`, every time. After: `fill_summary = {'username': ...,
+  'password': '••••••••••'}`, landed on `/success`.
+- **Regression check**: a REAL `<form>` with a genuine `type="submit"`
+  Log In button AND a `type="button"` Cancel button. The Cancel click
+  still returns `fill_summary = None` and correctly navigates to
+  `/cancelled` without touching the fields -- unchanged from before
+  this fix.
+- **Regression check on the real `type="submit"` button in the same
+  fixture**: still fills and submits normally, landing on
+  `/submitted?username=...&password=...`.
+- **Full live crawl of saucedemo.com** (a real `<form>`-based login,
+  unaffected by any of this): reached the inventory page, zero
+  checkpoints besides the expected `max_flows` budget note -- no
+  regression on the well-established real-form case.
+
+All 20 existing tests still pass; no leftover Playwright processes.
+Remaining items from the same audit (iframes, Shadow DOM, native
+dialogs, `target="_blank"`/popups, negative-input scenarios being
+fingerprint-blind) are real but deliberately not addressed in this
+pass -- this was the single highest-value item chosen first.

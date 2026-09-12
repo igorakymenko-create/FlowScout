@@ -51,6 +51,32 @@ _DISCOVER_JS = r"""
         return first.replace(/\s+/g, ' ').trim().slice(0, 60);
     }
 
+    // Real forms in modern JS apps commonly have no <form> element at
+    // all -- React/Vue apps build "forms" as plain containers (a <div>
+    // wrapping the fields) with a submit control marked type="button"
+    // specifically to suppress native form submission, since the app
+    // handles it via JS instead. Requiring a literal <form> ancestor
+    // made inForm false on exactly these apps, which meant
+    // fill_enclosing_form()/the choice-state reader (actions.py) never
+    // even tried to fill anything before clicking -- a login/search/
+    // filter submit on such a site was clicked with every field still
+    // empty, silently. Falls back to the closest ancestor that
+    // actually CONTAINS a real input/select/textarea -- capped by
+    // descendant count so this doesn't walk all the way up to <body>
+    // and "find" the whole page as one giant form.
+    function closestFormLike(el) {
+        const real = el.closest('form');
+        if (real) return real;
+        let n = el.parentElement;
+        while (n && n !== document.body) {
+            if (n.querySelector('input, select, textarea') && n.querySelectorAll('*').length <= 200) {
+                return n;
+            }
+            n = n.parentElement;
+        }
+        return null;
+    }
+
     // Real-world motivation: a live user question about a bank FAQ page
     // where a topic link had no matching anchor and silently "led to
     // itself" -- fingerprint.py always strips fragments, so a dangling
@@ -190,7 +216,7 @@ _DISCOVER_JS = r"""
             text: firstBlockText(n.innerText || n.value || n.getAttribute('aria-label')
                    || (n.querySelector('img[alt]') || {}).alt || n.getAttribute('title') || ''),
             type: (n.getAttribute('type') || '').toLowerCase(),
-            inForm: !!n.closest('form'),
+            inForm: !!closestFormLike(n),
             occluded: occluded,
             occludedBy: occluded
                 ? (atPoint ? (atPoint.className || atPoint.tagName || '').toString().slice(0, 60)
@@ -284,7 +310,7 @@ _DISCOVER_JS = r"""
             text: firstBlockText(el.innerText || el.getAttribute('aria-label')
                    || (el.querySelector('img[alt]') || {}).alt || el.getAttribute('title') || ''),
             type: (el.getAttribute('type') || '').toLowerCase(),
-            inForm: !!el.closest('form'),
+            inForm: !!closestFormLike(el),
             // Same full-page-overlay reasoning as the main candidates
             // above -- a div-as-button element behind an open modal is
             // just as unreachable as an <a>/<button> would be.
@@ -349,7 +375,7 @@ _DISCOVER_JS = r"""
                 href: '',
                 text: (opt.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 60),
                 type: 'select-option',
-                inForm: !!s.closest('form'),
+                inForm: !!closestFormLike(s),
                 occluded: false, occludedBy: '',
                 className: (s.className || '').toString().slice(0, 120),
                 ariaLabel: s.getAttribute('aria-label') || '',
@@ -422,7 +448,7 @@ _DISCOVER_JS = r"""
             href: '',
             text: inputLabelText(el),
             type: 'radio-choice',
-            inForm: !!el.closest('form'),
+            inForm: !!closestFormLike(el),
             occluded: false, occludedBy: '',
             className: (el.className || '').toString().slice(0, 120),
             ariaLabel: el.getAttribute('aria-label') || '',
@@ -450,7 +476,7 @@ _DISCOVER_JS = r"""
             href: '',
             text: inputLabelText(el),
             type: 'checkbox-toggle',
-            inForm: !!el.closest('form'),
+            inForm: !!closestFormLike(el),
             occluded: false, occludedBy: '',
             className: (el.className || '').toString().slice(0, 120),
             ariaLabel: el.getAttribute('aria-label') || '',
@@ -505,7 +531,7 @@ _DISCOVER_JS = r"""
             href: '',
             text: name,
             type: role === 'radio' ? 'role-radio-choice' : 'role-checkbox-toggle',
-            inForm: !!el.closest('form'),
+            inForm: !!closestFormLike(el),
             occluded: false, occludedBy: '',
             className: (el.className || '').toString().slice(0, 120),
             ariaLabel: el.getAttribute('aria-label') || '',
@@ -1044,32 +1070,94 @@ def _synth_value(name: str, type_: str, credentials: dict) -> str:
     return "flowscout_test"
 
 
+_CLOSEST_FORM_LIKE_JS = r"""(el) => {
+    // Same fallback as _DISCOVER_JS's own closestFormLike() -- kept as
+    // a separate copy here (not shared code) because this runs in a
+    // fresh evaluate_handle() call at action time, not inside the one
+    // big discovery script -- see this function's own call sites for
+    // why a literal <form> ancestor can't be assumed to exist.
+    const real = el.closest('form');
+    if (real) return real;
+    let n = el.parentElement;
+    while (n && n !== document.body) {
+        if (n.querySelector('input, select, textarea') && n.querySelectorAll('*').length <= 200) {
+            return n;
+        }
+        n = n.parentElement;
+    }
+    return null;
+}"""
+
+
+def _closest_form_like_handle(page, el_meta: dict):
+    """Resolves el_meta's own container -- a real <form> ancestor if
+    one exists, else the closest ancestor that actually contains a real
+    input/select/textarea (see _CLOSEST_FORM_LIKE_JS's own comment).
+    Returns None if the target can't be located at all, or has no such
+    container (a bare button with no nearby fields, correctly nothing
+    to fill)."""
+    target = build_locator(page, el_meta)
+    try:
+        target_handle = target.element_handle(timeout=2000)
+    except Exception:
+        return None
+    if target_handle is None:
+        return None
+    try:
+        container = target_handle.evaluate_handle(_CLOSEST_FORM_LIKE_JS)
+        return container.as_element()
+    except Exception:
+        return None
+
+
 def fill_enclosing_form(page, el_meta: dict, credentials: dict) -> dict | None:
     """Best-effort: fill every visible input/select/textarea in the form
-    that contains the target element, using config credentials where the
+    (or form-LIKE container -- see _closest_form_like_handle) that
+    contains the target element, using config credentials where the
     field name matches, else a synthetic safe value. Mirrors the spec's
     'boundary/valid-value' idea in its simplest form for M0.
 
     Returns None if `el_meta` isn't actually a submit control (so the
     caller knows this wasn't a form submission at all -- e.g. a "Cancel"
-    button with type="button" inside a form shouldn't be mislabeled as
-    submitting it), otherwise a {field_name: value_used} summary (values
-    masked for password fields) so the report can say what was filled,
-    which matters most for login steps.
+    button with type="button" inside a REAL form shouldn't be
+    mislabeled as submitting it), otherwise a {field_name: value_used}
+    summary (values masked for password fields) so the report can say
+    what was filled, which matters most for login steps.
     """
     if not el_meta.get("inForm") or el_meta.get("type") in (
-            "button", "select-option", "radio-choice", "checkbox-toggle",
+            "select-option", "radio-choice", "checkbox-toggle",
             "role-radio-choice", "role-checkbox-toggle"):
         return None
-    target = build_locator(page, el_meta)
-    form = target.locator("xpath=ancestor::form[1]")
+    container = _closest_form_like_handle(page, el_meta)
+    if container is None:
+        return {}
+    if el_meta.get("type") == "button":
+        # type="button" is ambiguous on its own -- inside a REAL <form>
+        # it's very likely a genuine Cancel/decorative control (the
+        # form's own submit would ordinarily be type="submit", or a
+        # bare <button> which defaults to submit). But when there's no
+        # real <form> at all -- closestFormLike's own fallback to a
+        # plain container -- type="button" is often the ONLY way a
+        # modern JS app marks its actual submit action, precisely to
+        # suppress native submission and handle it in JS instead.
+        # Found live: a formless React-style login (a <div> wrapping
+        # two inputs and a type="button" submit) was clicked with both
+        # fields still empty, every time, because this guard treated
+        # every type="button" as "not a submission" unconditionally.
+        # Only exclude it when a genuine <form> exists to make "Cancel"
+        # a meaningful alternative to begin with.
+        try:
+            is_real_form = container.evaluate("e => e.tagName.toLowerCase() === 'form'")
+        except Exception:
+            is_real_form = False
+        if is_real_form:
+            return None
     try:
-        count = form.locator("input, select, textarea").count()
+        fields = container.query_selector_all("input, select, textarea")
     except Exception:
         return {}
     summary: dict[str, str] = {}
-    for i in range(count):
-        field = form.locator("input, select, textarea").nth(i)
+    for field in fields:
         try:
             tag = field.evaluate("e => e.tagName.toLowerCase()")
             type_ = (field.get_attribute("type") or "text").lower()
@@ -1136,9 +1224,10 @@ def _read_choice_state(page, el_meta: dict) -> dict[str, str]:
     if not el_meta.get("inForm"):
         return {}
     try:
-        target = build_locator(page, el_meta)
-        form = target.locator("xpath=ancestor::form[1]")
-        result = form.evaluate("""(formEl) => {
+        container = _closest_form_like_handle(page, el_meta)
+        if container is None:
+            return {}
+        result = container.evaluate("""(formEl) => {
             // Same label lookup as inputLabelText() in _DISCOVER_JS: a
             // label[for=id] first, but real markup (e.g. httpbin's own
             // pizza form) commonly wraps the input in <label> instead of
