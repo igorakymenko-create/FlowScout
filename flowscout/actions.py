@@ -618,7 +618,47 @@ _DISCOVER_JS = r"""
         }
     } catch (e) { /* :user-invalid unsupported -- aria-invalid/role=alert above still apply */ }
 
-    return {candidates, pool, legacyUnclassified, selects, radios, checkboxes, roleControls, validationSignals};
+    // CAPTCHA/challenge visibility (Sep 2026): a page behind a CAPTCHA or
+    // a bot-mitigation interstitial (Cloudflare's own "Just a moment..."
+    // page, a reCAPTCHA/hCaptcha/Turnstile widget gating a form) was
+    // previously indistinguishable from ordinary content -- the crawler
+    // would discover whatever candidates the challenge page itself
+    // happens to expose and keep exploring it like any other state,
+    // rather than recognizing it and stopping. Detected via each
+    // vendor's OWN documented integration markers -- never a guess about
+    // any one site's markup, the same standards-based discipline as
+    // validationSignals above:
+    const captchaSignals = new Set();
+    for (const el of queryAllDeep(document, 'iframe[src]')) {
+        const src = el.src || '';
+        if (/recaptcha/i.test(src)) captchaSignals.add('reCAPTCHA (iframe)');
+        else if (/hcaptcha\.com/i.test(src)) captchaSignals.add('hCaptcha (iframe)');
+        else if (/challenges\.cloudflare\.com/i.test(src)) captchaSignals.add('Cloudflare Turnstile (iframe)');
+    }
+    // .g-recaptcha/.h-captcha/[data-sitekey]/.cf-turnstile are each
+    // vendor's own documented widget-container class/attribute, required
+    // by their own integration instructions -- not this project's guess.
+    if (queryAllDeep(document, '.g-recaptcha, [data-sitekey]').length) captchaSignals.add('CAPTCHA widget marker (data-sitekey)');
+    if (queryAllDeep(document, '.cf-turnstile').length) captchaSignals.add('Cloudflare Turnstile widget marker');
+    // Cloudflare's own full-page challenge interstitial ("Just a
+    // moment...") loads its orchestration script from this documented
+    // path regardless of the page's own markup -- catches the
+    // whole-page-is-a-challenge case the widget markers above don't
+    // (there's no ordinary content there for a widget to sit inside).
+    // NOTE: matched against Cloudflare's publicly documented script path,
+    // not verified live against a real Cloudflare challenge (this
+    // project has no such site to test against) -- see ROADMAP.md.
+    for (const el of queryAllDeep(document, 'script[src]')) {
+        if ((el.src || '').includes('/cdn-cgi/challenge-platform/')) {
+            captchaSignals.add('Cloudflare challenge interstitial');
+            break;
+        }
+    }
+
+    return {
+        candidates, pool, legacyUnclassified, selects, radios, checkboxes, roleControls,
+        validationSignals, captchaSignals: Array.from(captchaSignals),
+    };
 }
 """
 
@@ -1011,8 +1051,9 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
 
 def discover_candidates(page, current_domain: str, allowed_domains: list[str],
                          exclude_patterns: list[str] | None = None
-                         ) -> tuple[list[ElementCandidate], list[dict], list[dict], list[dict], list[str]]:
-    """Returns (candidates, occluded, unclassified, disabled, validation_signals).
+                         ) -> tuple[list[ElementCandidate], list[dict], list[dict], list[dict], list[str], list[str]]:
+    """Returns (candidates, occluded, unclassified, disabled, validation_signals,
+    captcha_signals).
 
     occluded: on-screen and otherwise valid candidates currently covered
     by something else (an open menu panel, a modal) per the browser's own
@@ -1042,6 +1083,15 @@ def discover_candidates(page, current_domain: str, allowed_domains: list[str],
     submission state fingerprints differently from its pre-submit state,
     instead of reading as an indistinguishable revisit.
 
+    captcha_signals: normalized strings naming which CAPTCHA/challenge
+    marker was found (a reCAPTCHA/hCaptcha/Turnstile iframe or widget
+    container, or Cloudflare's own challenge-interstitial script) -- see
+    _DISCOVER_JS's own comment for exactly what's checked and its
+    disclosed verification limit. NOT fed into state_fingerprint() --
+    unlike validation_signals, the caller doesn't want to keep exploring
+    a CAPTCHA state at all, so fingerprint stability there doesn't
+    matter; it forces the resulting flow to BLOCKED instead.
+
     Runs across every frame in the page (`page.frames`), not just the
     main one (Aug 2026) -- a same- or cross-origin <iframe>'s own
     content was previously completely invisible: it's a genuinely
@@ -1065,6 +1115,7 @@ def discover_candidates(page, current_domain: str, allowed_domains: list[str],
     pool: list[dict] = []
     legacy_unclassified_raw: list[dict] = []
     validation_signals: list[str] = []
+    captcha_signals: list[str] = []
     for frame in page.frames:
         try:
             payload = frame.evaluate(_DISCOVER_JS)
@@ -1082,6 +1133,11 @@ def discover_candidates(page, current_domain: str, allowed_domains: list[str],
         # real validation-error state too.
         for sig in payload.get("validationSignals", []):
             validation_signals.append(f"{frame_url}:{sig}" if frame_url else sig)
+        # Same reasoning as validation_signals -- a CAPTCHA embedded as a
+        # same/cross-origin iframe (a login form's reCAPTCHA widget) is
+        # gathered here too, not just a whole-page interstitial.
+        for sig in payload.get("captchaSignals", []):
+            captcha_signals.append(f"{frame_url}:{sig}" if frame_url else sig)
         if is_main:
             pool = payload["pool"]
             legacy_unclassified_raw = payload.get("legacyUnclassified", [])
@@ -1128,7 +1184,7 @@ def discover_candidates(page, current_domain: str, allowed_domains: list[str],
     via_order = {"handler": 0, "markup": 1}
     candidates.sort(key=lambda c: (order[c.risk], via_order.get(c.discovered_via, 1)))
     disabled = _aggregate_unclassified(disabled_raw)
-    return candidates, occluded, unclassified, disabled, validation_signals
+    return candidates, occluded, unclassified, disabled, validation_signals, captcha_signals
 
 
 def build_locator(page, el_meta: dict):

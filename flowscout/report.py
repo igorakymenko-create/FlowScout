@@ -48,6 +48,13 @@ def _flow_steps_html(flow, states: dict) -> str:
             outcome_note = f' <span class="step-note">→ back to an already-explored state{dest}</span>'
         elif t.outcome == "error":
             outcome_note = f' <span class="step-note step-error">→ error: {_esc(t.detail[:140])}</span>'
+        elif t.outcome == "blocked":
+            # Set only by a CAPTCHA/challenge detection (crawler.py's
+            # captcha_detected handling) -- the flow's own card already
+            # shows the "Blocked" pill and the full reason via
+            # dedup_reason, this is the per-step echo of it, same
+            # relationship captcha_detected below has to that reason.
+            outcome_note = ' <span class="step-note step-error">→ blocked (see reason above)</span>'
         # response_status is a pure visibility signal (see actions.py's
         # _capture_nav_status) -- it never changed what got crawled, so it's
         # additive to whatever outcome_note already says, not a replacement.
@@ -94,6 +101,17 @@ def _flow_steps_html(flow, states: dict) -> str:
             outcome_note += (
                 f' <span class="step-note step-error">→ validation error: '
                 f'{_esc(t.validation_errors)}</span>'
+            )
+        # captcha_detected (Sep 2026): like validation_errors, this
+        # changes what happens next (crawler.py forces the flow to
+        # BLOCKED and never explores past it) rather than being purely
+        # observational -- surfaced inline here in addition to the
+        # flow-level "Blocked" reason so it's visible scanning the step
+        # list alone, without needing to also read the card's own text.
+        if t.captcha_detected:
+            outcome_note += (
+                f' <span class="step-note step-error">→ CAPTCHA/challenge detected: '
+                f'{_esc(t.captcha_detected)}</span>'
             )
         parts.append(
             f'<li class="step"><span class="step-idx">{i + 1}</span>'

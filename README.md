@@ -17,6 +17,13 @@ writes your tests for you" — and a more honest one.
   `destructive` before ever touching it. Destructive actions (logout,
   leaving the allowed domain, an excluded page) are never followed.
   Mutating ones (checkout, submit, delete...) only run if you opt in.
+- **Recognizes a CAPTCHA/challenge page** for what it is (reCAPTCHA,
+  hCaptcha, Cloudflare Turnstile, Cloudflare's own challenge
+  interstitial) and reports it as a Blocked flow naming which marker
+  was found — never attempts to solve or bypass it. A real test
+  environment should disable CAPTCHA entirely or use the vendor's own
+  test sitekeys; that's a target-site configuration choice, not
+  something this crawler does for you.
 - **Dedupes** flows three ways: structural (same normalized action
   sequence), state-convergence (different paths landing on the same
   application state), and — optionally, needs an embeddings API key —

@@ -149,12 +149,12 @@ class _Frame:
 
 
 def _discover_state(page, allowed_domains, run: RunResult
-                     ) -> tuple[str, str, str, list[ElementCandidate], list[dict], list[dict], list[str]]:
+                     ) -> tuple[str, str, str, list[ElementCandidate], list[dict], list[dict], list[str], list[str]]:
     url_pattern = normalize_url(page.url)
     title = page.title()
     domain = current_domain(page.url)
     exclude_patterns = run.config.get("exclude_patterns", [])
-    candidates, occluded, unclassified, disabled, validation_signals = discover_candidates(
+    candidates, occluded, unclassified, disabled, validation_signals, captcha_signals = discover_candidates(
         page, domain, allowed_domains, exclude_patterns)
     # validation_signals folded into the fingerprint itself (not just
     # reported afterward, like dialog_message/response_status are) --
@@ -162,13 +162,14 @@ def _discover_state(page, allowed_domains, run: RunResult
     # validation_errors for why: without this, a rejected-submission
     # state is byte-for-byte identical (by url+candidate-set) to its own
     # pre-submit state, so the crawler read it as a plain revisit and
-    # never explored past it.
+    # never explored past it. captcha_signals is deliberately NOT folded
+    # in here -- see Transition.captcha_detected's own docstring.
     fp = state_fingerprint(url_pattern, [c.signature for c in candidates] + validation_signals)
     for o in occluded:
         run.skipped_candidates.append({
             "state_fp": fp, "label": o["label"], "reason": o["reason"], "risk": "n/a",
         })
-    return fp, url_pattern, title, candidates, unclassified, disabled, validation_signals
+    return fp, url_pattern, title, candidates, unclassified, disabled, validation_signals, captcha_signals
 
 
 def _run_path(browser, config, path: list[Transition], run: RunResult, credentials: dict):
@@ -176,16 +177,16 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
     cookies/localStorage -- no leakage between DFS branches). Returns
     (fp, url_pattern, title, candidates, last_fill_summary, unclassified,
     disabled, last_choice_state, last_response_status,
-    last_dialog_message, last_opened_new_page, validation_errors) for
-    the state reached after the last step, or None if some step failed
-    (an error checkpoint is recorded, pointing at which step).
-    `validation_errors` is the joined validation-error signal string
-    for the state reached after the LAST step (see _discover_state/
-    Transition.validation_errors) -- unlike the other `last_*` fields
-    below, it describes the state itself, not the action that produced
-    it, so it isn't specific to "the final step of `path`" in the same
-    way; it's simply whatever _discover_state() found there.
-    `last_fill_summary`
+    last_dialog_message, last_opened_new_page, validation_errors,
+    captcha_signals) for the state reached after the last step, or None
+    if some step failed (an error checkpoint is recorded, pointing at
+    which step). `validation_errors`/`captcha_signals` describe the
+    state reached after the LAST step (see _discover_state/
+    Transition.validation_errors/captcha_detected) -- unlike the other
+    `last_*` fields below, they describe the state itself, not the
+    action that produced it, so they aren't specific to "the final step
+    of `path`" in the same way; they're simply whatever _discover_state()
+    found there. `last_fill_summary`
     is whatever perform_action returned for the *final* step of `path`
     -- None if that step wasn't a form submission, else the field:value
     summary used to build a readable "Fill form and submit ... (...)"
@@ -238,12 +239,13 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
                     detail=str(exc)[:1200],
                 ))
                 return None
-        fp, url_pattern, title, candidates, unclassified, disabled, validation_signals = _discover_state(
-            page, config["allowed_domains"], run)
+        (fp, url_pattern, title, candidates, unclassified, disabled, validation_signals,
+         captcha_signals) = _discover_state(page, config["allowed_domains"], run)
         validation_errors = "; ".join(validation_signals)
+        captcha_detected = "; ".join(captcha_signals)
         return (fp, url_pattern, title, candidates, last_fill_summary, unclassified, disabled,
                 last_choice_state, last_response_status, last_dialog_message, last_opened_new_page,
-                validation_errors)
+                validation_errors, captcha_detected)
     finally:
         context.close()
 
@@ -512,7 +514,8 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
             continue
 
         (new_fp, url_pat, title, new_candidates, fill_summary, new_unclassified, new_disabled,
-         choice_state, response_status, dialog_message, opened_new_page, validation_errors) = result
+         choice_state, response_status, dialog_message, opened_new_page, validation_errors,
+         captcha_detected) = result
         # choice_state (radio/checkbox selections observed at submit time) is
         # merged into the label for human/gap-analysis visibility only -- it
         # must never reach trial.form_fields, since M4's codegen turns that
@@ -527,6 +530,7 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
         trial.dialog_message = dialog_message
         trial.opened_new_page = opened_new_page
         trial.validation_errors = validation_errors
+        trial.captcha_detected = captcha_detected
         new_path = frame.path + [trial]
 
         if new_fp in run.states:
@@ -540,7 +544,47 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
             # existed (add-to-cart/checkout/remove/cancel all showed
             # up as revisit-producers, not just UI-chrome toggles).
             revisit_history.add(candidate.norm_signature)
-            emit_flow(new_path, end_fp=new_fp)
+            if captcha_detected:
+                # Found live, not assumed: a DIFFERENT action path can
+                # reach the SAME captcha state that some earlier branch
+                # already discovered (e.g. a normal click lands on the
+                # exact page a seed URL was ALSO seeded at) -- captcha_
+                # detected here is _discover_state()'s own fresh re-check
+                # for THIS replay, not a cached value, so it's just as
+                # reliable as the first-discovery case above. Without
+                # this, only the flow that happened to discover the
+                # state FIRST got marked blocked; every later one reading
+                # the exact same challenge page read as an ordinary,
+                # unremarkable "unique"/"duplicate" flow instead.
+                trial.outcome = "blocked"
+                emit_flow(new_path, end_fp=new_fp, forced_status=FlowStatus.BLOCKED,
+                          extra_reason=f"Blocked by a CAPTCHA/challenge page ({captcha_detected}) "
+                                       f"-- never explored further")
+            else:
+                emit_flow(new_path, end_fp=new_fp)
+            continue
+
+        if captcha_detected:
+            # A genuinely NEW state, but one behind a CAPTCHA/challenge
+            # marker (see actions.py's discover_candidates docstring) --
+            # recorded (unlike the max_states-truncation branch below,
+            # this state IS worth keeping as evidence of exactly where
+            # the crawl got challenged) but never explored further: there
+            # is nothing legitimate to click on a challenge page, and
+            # trying would risk interacting with the CAPTCHA widget
+            # itself rather than the app under test. trial.outcome was
+            # set to "ok"/"revisit" above -- overwritten here since
+            # neither is accurate for what actually happened.
+            trial.outcome = "blocked"
+            run.states[new_fp] = StateNode(
+                fingerprint=new_fp, url_pattern=url_pat, raw_url="", title=title,
+                candidates=new_candidates, discovered_by_flow=next_flow_id[0],
+                unclassified_interactive=new_unclassified, disabled_interactive=new_disabled,
+                captcha_detected=captcha_detected,
+            )
+            emit_flow(new_path, end_fp=new_fp, forced_status=FlowStatus.BLOCKED,
+                      extra_reason=f"Blocked by a CAPTCHA/challenge page ({captcha_detected}) "
+                                   f"-- never explored further")
             continue
 
         if len(run.states) - states_before >= max_states:
@@ -629,7 +673,7 @@ def crawl(config: dict) -> RunResult:
         # tag == "direct-nav"), so what a seed URL shows depends only on
         # the URL itself, never on which persona is walking, exactly like
         # the empty-path root state above.
-        seed_fps: dict[str, str] = {}
+        seed_fps: dict[str, tuple[str, str]] = {}  # url -> (fingerprint, captcha_detected)
 
         for persona in personas:
             persona_name = persona.get("name", "default")
@@ -662,12 +706,33 @@ def crawl(config: dict) -> RunResult:
                     browser.close()
                     return run
                 (root_fp, root_url_pat, root_title, root_candidates, _, root_unclassified,
-                 root_disabled, _, _, _, _, _) = root
+                 root_disabled, _, _, _, _, _, root_captcha) = root
                 run.states[root_fp] = StateNode(
                     fingerprint=root_fp, url_pattern=root_url_pat, raw_url=config["start_url"],
                     title=root_title, candidates=root_candidates,
                     unclassified_interactive=root_unclassified, disabled_interactive=root_disabled,
+                    captcha_detected=root_captcha,
                 )
+                if root_captcha:
+                    # start_url itself is behind a CAPTCHA/challenge --
+                    # there's no Transition/Flow to attach this to (an
+                    # empty path never goes through emit_flow, same
+                    # reasoning _path_to_state's own docstring gives for
+                    # the root state), so this is a checkpoint, not a
+                    # blocked flow. Nothing past here is explorable for
+                    # ANY persona (root is shared across all of them), so
+                    # stop the crawl entirely rather than let every
+                    # persona separately "explore" a challenge page's own
+                    # incidental candidates.
+                    run.checkpoints.append(Checkpoint(
+                        kind="blocked", flow_id=None, state_fp=root_fp,
+                        message="start_url is itself behind a CAPTCHA/challenge page -- "
+                                "crawl stopped, nothing else is explorable",
+                        detail=root_captcha,
+                    ))
+                    run.finished_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    browser.close()
+                    return run
 
             root_node = run.states[root_fp]
             root_frame = _Frame(fp=root_fp)
@@ -702,8 +767,8 @@ def crawl(config: dict) -> RunResult:
                         # URL just isn't explorable, nothing more to do.
                         continue
                     (seed_fp, seed_url_pat, seed_title, seed_candidates, _, seed_unclassified,
-                     seed_disabled, _, seed_status, seed_dialog, seed_new_page, seed_validation) = seed_result
-                    seed_trial.to_fp = seed_fp
+                     seed_disabled, _, seed_status, seed_dialog, seed_new_page, seed_validation,
+                     seed_captcha) = seed_result
                     seed_trial.response_status = seed_status
                     seed_trial.dialog_message = seed_dialog
                     seed_trial.opened_new_page = seed_new_page
@@ -713,12 +778,39 @@ def crawl(config: dict) -> RunResult:
                             fingerprint=seed_fp, url_pattern=seed_url_pat, raw_url=seed_url,
                             title=seed_title, candidates=seed_candidates,
                             unclassified_interactive=seed_unclassified, disabled_interactive=seed_disabled,
+                            captcha_detected=seed_captcha,
                         )
-                    seed_fps[seed_url] = seed_fp
-                else:
-                    seed_trial.to_fp = seed_fps[seed_url]
-                seed_node = run.states[seed_trial.to_fp]
-                seed_frame = _Frame(fp=seed_trial.to_fp, path=[seed_trial])
+                    # Cached as (fp, captcha) together, not just fp --
+                    # otherwise a LATER persona reusing this seed_url
+                    # would skip straight to pushing an ordinary frame
+                    # for it, silently losing the captcha finding this
+                    # first persona already made.
+                    seed_fps[seed_url] = (seed_fp, seed_captcha)
+
+                seed_fp, seed_captcha = seed_fps[seed_url]
+                seed_trial.to_fp = seed_fp
+                seed_trial.captcha_detected = seed_captcha
+                if seed_captcha:
+                    # Same reasoning as the main DFS loop's own captcha
+                    # branch: a real Flow here (not just a checkpoint),
+                    # since a seed URL's own arrival -- unlike root's --
+                    # already has a non-empty path/action_label worth
+                    # reporting as its own "Blocked" card. Built directly
+                    # rather than through _run_dfs's own emit_flow closure
+                    # (not in scope here) -- same pattern
+                    # explore_combination() already uses for its own
+                    # one-off Flow construction outside that closure.
+                    seed_trial.outcome = "blocked"
+                    run.flows.append(Flow(
+                        id=next_flow_id[0], status=FlowStatus.BLOCKED, duplicate_of=None,
+                        dedup_reason=f"Blocked by a CAPTCHA/challenge page ({seed_captcha}) "
+                                     f"-- never explored further",
+                        transitions=[seed_trial], end_state_fp=seed_fp, persona=persona_name,
+                    ))
+                    next_flow_id[0] += 1
+                    continue
+                seed_node = run.states[seed_fp]
+                seed_frame = _Frame(fp=seed_fp, path=[seed_trial])
                 seed_frame.order = _order_for(seed_node, max_breadth, run, revisit_history)
                 stack.append(seed_frame)
 
@@ -990,7 +1082,8 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
                 raise RuntimeError("the combination failed to apply -- see this run's checkpoints "
                                     "for which step and why")
             (new_fp, url_pat, title, new_candidates, fill_summary, new_unclassified, new_disabled,
-             choice_state, response_status, dialog_message, opened_new_page, validation_errors) = result
+             choice_state, response_status, dialog_message, opened_new_page, validation_errors,
+             captcha_detected) = result
 
             last = combo_path[-1]
             label_fields = {**(fill_summary or {}), **(choice_state or {})}
@@ -1002,9 +1095,10 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
             last.dialog_message = dialog_message
             last.opened_new_page = opened_new_page
             last.validation_errors = validation_errors
+            last.captcha_detected = captcha_detected
 
             combo_note = "Set via a user-specified parameter combination"
-            if new_fp in run.states:
+            if new_fp in run.states and not captcha_detected:
                 last.outcome = "revisit"
                 flow = Flow(
                     id=next_flow_id[0], status=FlowStatus.UNIQUE, duplicate_of=None,
@@ -1013,6 +1107,35 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
                     origin_note=combo_note,
                 )
                 run.flows.append(flow)
+            elif captcha_detected:
+                # Checked BEFORE the plain "already-known state" branch
+                # above, not only in an else -- captcha_detected here is
+                # _discover_state()'s own fresh re-check for THIS combo,
+                # so it's just as reliable whether new_fp turns out to be
+                # brand new or a state some earlier path already reached
+                # (found live: without this ordering, a combination
+                # landing on an ALREADY-discovered captcha page read as
+                # an unremarkable revisit instead of blocked). Records
+                # the state as evidence if it's genuinely new, emits a
+                # BLOCKED flow naming why, never pushes a frame to
+                # explore a challenge page's own incidental candidates.
+                last.outcome = "blocked"
+                if new_fp not in run.states:
+                    run.states[new_fp] = StateNode(
+                        fingerprint=new_fp, url_pattern=url_pat, raw_url="", title=title,
+                        candidates=new_candidates, discovered_by_flow=next_flow_id[0],
+                        unclassified_interactive=new_unclassified, disabled_interactive=new_disabled,
+                        captcha_detected=captcha_detected,
+                    )
+                flow = Flow(
+                    id=next_flow_id[0], status=FlowStatus.BLOCKED, duplicate_of=None,
+                    dedup_reason=f"Blocked by a CAPTCHA/challenge page ({captcha_detected}) "
+                                 f"-- never explored further",
+                    transitions=combo_path, end_state_fp=new_fp, persona=persona_name,
+                    origin_note=combo_note,
+                )
+                run.flows.append(flow)
+                next_flow_id[0] += 1
             else:
                 last.outcome = "ok"
                 new_node = StateNode(

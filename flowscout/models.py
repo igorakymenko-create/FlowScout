@@ -104,6 +104,15 @@ class StateNode:
     # disabled pending an unrelated selection). Each dict has
     # tag/className/text/count.
     disabled_interactive: list[dict] = field(default_factory=list)
+    # "" if this state shows no CAPTCHA/challenge marker, otherwise each
+    # one joined by "; " -- see Transition.captcha_detected's own
+    # docstring for what's detected. Stored on the STATE, not just the
+    # one Transition that happened to discover it first: a captcha state
+    # reached again later by a DIFFERENT action path is still a captcha
+    # state, and every flow ending there should read as blocked for that
+    # reason -- not just the one that discovered it. Checked by
+    # crawler.py on every revisit, not only on first discovery.
+    captcha_detected: str = ""
 
 
 @dataclass
@@ -114,7 +123,7 @@ class Transition:
     action_norm_signature: str
     risk: Risk
     risk_reason: str = ""
-    outcome: str = "ok"       # ok | revisit | skipped | error
+    outcome: str = "ok"       # ok | revisit | skipped | error | blocked
     detail: str = ""
     replay_meta: str = ""      # JSON descriptor of the element, used to relocate it on replay
     # Field NAMES only (e.g. "user-name", "password") when this step filled
@@ -186,6 +195,20 @@ class Transition:
     # required-field misses) was structurally invisible, not merely
     # deprioritized.
     validation_errors: str = ""
+    # "" if no CAPTCHA/challenge marker was found on the page reached after
+    # this action, otherwise each one joined by "; " -- see actions.py's
+    # _DISCOVER_JS ("captchaSignals") for exactly what's detected (a
+    # reCAPTCHA/hCaptcha/Cloudflare Turnstile iframe or widget container,
+    # or Cloudflare's own challenge-interstitial script). Unlike
+    # validation_errors, NOT fed into state_fingerprint() -- the crawler
+    # doesn't want to keep exploring a CAPTCHA state at all, so
+    # crawler.py forces this transition's flow to FlowStatus.BLOCKED
+    # instead, with this field naming why in the flow's own reason text.
+    # Added directly from a live question: without this, a CAPTCHA/
+    # challenge page was explored like any other state -- its own
+    # candidates (if any) discovered and potentially clicked, its
+    # occurrence never surfaced anywhere in the report.
+    captcha_detected: str = ""
 
 
 @dataclass
@@ -295,6 +318,7 @@ class RunResult:
                 title=s.get("title", ""), candidates=candidates, discovered_by_flow=s.get("discovered_by_flow"),
                 unclassified_interactive=s.get("unclassified_interactive", []),
                 disabled_interactive=s.get("disabled_interactive", []),
+                captcha_detected=s.get("captcha_detected", ""),
             )
         for f in d.get("flows", []):
             transitions = [

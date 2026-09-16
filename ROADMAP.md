@@ -4154,3 +4154,164 @@ All 20 existing tests still pass; the fixture server and its port
 confirmed shut down; the test run created through the live HTTP API
 removed from `runs/`; no leftover Playwright/headless-Chromium
 processes.
+
+## Recognize CAPTCHA/challenge pages and report them as Blocked (done, Sep 2026)
+
+Prompted by a real Cloudflare email about changes to its AI-crawler
+controls, which led to the actual question worth answering: FlowScout
+itself isn't affected by that specific policy (it doesn't send any
+declared-AI-bot signature -- verified in the code: no `user_agent` is
+set anywhere, so Playwright's own stock Chrome UA goes out unchanged),
+but a genuinely adjacent, pre-existing gap surfaced from the
+discussion -- the crawler had zero handling for a CAPTCHA or bot-
+mitigation interstitial. It would discover whatever candidates a
+challenge page happens to expose and explore it like any other state,
+with the encounter itself never surfacing anywhere in the report.
+
+**Explicit, deliberate non-goal, decided before writing anything:**
+FlowScout will not attempt to solve or bypass a CAPTCHA. A third-party
+CAPTCHA-solving service (human-solver farms, ML-based solvers) doesn't
+distinguish "this is the site's own owner testing it" from "this is
+someone scraping a site they don't control" -- building that capability
+into an autonomous crawler is building a general anti-bot-evasion tool,
+not a QA tool, regardless of this project's own intended use. The right
+answer for a real test environment is disabling CAPTCHA there entirely,
+or using the vendor's own official test/dummy sitekeys (Cloudflare
+Turnstile and reCAPTCHA both publish ones made exactly for automated
+testing) -- outside this codebase's own scope to build, since it's a
+target-site configuration choice, not a crawler feature. What IS this
+project's job: recognize a challenge when the crawler hits one, and
+say so clearly instead of pretending it's ordinary content.
+
+**Detection, standards-based only, same discipline as validationSignals
+before it -- never a guess about any one site's own markup:**
+
+- `iframe[src]` matching `recaptcha`/`hcaptcha.com`/
+  `challenges.cloudflare.com` -- each vendor's own required embed
+  mechanism.
+- `.g-recaptcha`/`[data-sitekey]`/`.cf-turnstile` -- each vendor's own
+  documented widget-container class/attribute, mandated by their own
+  integration instructions, not this project's guess about any site's
+  CSS conventions.
+- `script[src]` containing `/cdn-cgi/challenge-platform/` -- catches
+  Cloudflare's own full-page "Just a moment..." interstitial, which
+  has no ordinary content for a widget marker to sit inside at all.
+
+**Disclosed verification limit, stated plainly rather than glossed
+over:** the first two categories were verified live end to end through
+the real `crawl()` pipeline against a fixture built to carry each
+vendor's documented marker. The Cloudflare interstitial script-path
+marker was matched against Cloudflare's own publicly documented
+structure, NOT verified against a real, live Cloudflare challenge --
+this project has no Cloudflare-protected site to test against. If this
+turns out to misfire in practice, the fix is narrowing or correcting
+one pattern in `_DISCOVER_JS`, not a design change.
+
+**Built:**
+
+- `_DISCOVER_JS` (`actions.py`): the markers above, gathered per frame
+  (so a CAPTCHA embedded in an iframe -- e.g. a login form's reCAPTCHA
+  widget -- is caught too, not just a whole-page interstitial),
+  deduped via a `Set`, returned as `captchaSignals`.
+- `discover_candidates()` returns a 6th element, `captcha_signals`,
+  merged across frames (each non-main one prefixed with its
+  `frameUrl`, same convention as `validation_signals`). Deliberately
+  NOT fed into `state_fingerprint()` -- unlike a validation error, the
+  crawler doesn't want to keep exploring a CAPTCHA state at all, so
+  fingerprint stability there doesn't matter; it forces the flow to
+  BLOCKED instead.
+- `Transition.captcha_detected: str` and `StateNode.captcha_detected:
+  str` (`models.py`) -- stored on the STATE too, not just the one
+  Transition that happened to discover it first (see the bug below for
+  why that distinction turned out to matter). `Transition.outcome`
+  gains a new value, `"blocked"`.
+- `crawler.py`, all four places a new state gets discovered:
+  - `_run_dfs`'s main loop: a genuinely new state behind a CAPTCHA
+    marker is recorded (evidence of exactly where the crawl got
+    challenged) but no `_Frame` is pushed for it -- nothing legitimate
+    to click on a challenge page, and trying risks interacting with
+    the CAPTCHA widget itself rather than the app under test. The
+    flow is forced to `FlowStatus.BLOCKED` with the marker(s) named in
+    its own reason text.
+  - `crawl()`'s root discovery: if `start_url` itself is behind a
+    CAPTCHA, there's no Transition to attach a Blocked flow to (an
+    empty path never reaches `emit_flow`) -- recorded as a Checkpoint
+    instead, and the crawl stops entirely (root is shared across every
+    persona, so nothing downstream is explorable for any of them).
+  - `crawl()`'s seed-URL discovery (see the direct-URL-seeding entry
+    above): a seed landing on a CAPTCHA DOES have a real path/label
+    worth its own Blocked flow -- built directly (the same "construct
+    a Flow without `_run_dfs`'s own `emit_flow` closure" pattern
+    `explore_combination()` already uses), and cached as
+    `(fingerprint, captcha_signal)` together so a LATER persona reusing
+    this seed doesn't silently lose the finding.
+  - `explore_combination()`: same BLOCKED treatment, checked BEFORE
+    the plain "already-known state" branch rather than only in an
+    `else` -- see the bug below for why the ordering itself matters.
+- `report.py`: a `"blocked"` outcome gets its own per-step note; a new
+  `captcha_detected` note (styled as an error, additive to whatever
+  else the step already says) mirrors `validation_errors`' own
+  treatment, visible both inline per-step and in the flow card's own
+  "Blocked" pill + reason text.
+
+**A real bug found by testing the fix, not by inspection:** the first
+working version only forced `FlowStatus.BLOCKED` on the flow that
+discovered a CAPTCHA state for the FIRST time. A live test proved this
+wrong: seeding `/verify` (the CAPTCHA page) directly via `seed_urls`,
+in the SAME crawl where an ordinary click path also happens to reach
+that identical page, showed the click path's own flow as an
+unremarkable "unique" -- not blocked -- purely because some OTHER
+branch had already discovered that fingerprint first. Root cause:
+`captcha_detected` was only checked on first discovery, never on the
+ordinary "already-known state" revisit path every later branch
+reaching the same state takes. Fixed by checking the CURRENT replay's
+own freshly-computed `captcha_detected` (not a cached value -- every
+replay re-runs `_discover_state()` from a fresh browser context, so
+it's just as reliable) in the revisit branch too, in both `_run_dfs`'s
+main loop and `explore_combination()` -- every flow that ends on a
+CAPTCHA state now reads as blocked, regardless of which path reached
+it, or in what order.
+
+**Verified live, through the full real `crawl()` pipeline, all three
+discovery paths in one fixture:**
+
+```
+1) main DFS loop -- click "Go to form" -> "Submit" -> lands on /verify:
+   flow 1 (blocked): 'Open "Go to form"', 'Click "Submit"'
+     reason: Blocked by a CAPTCHA/challenge page (reCAPTCHA (iframe);
+     CAPTCHA widget marker (data-sitekey); Cloudflare Turnstile widget
+     marker; Cloudflare challenge interstitial) -- never explored further
+   flow 3 (unique): 'Open "Ordinary link"'   <- unrelated flow unaffected
+
+2) seed_urls seeding /verify directly, in the SAME crawl as (1):
+   flow 1 (blocked): 'Open URL directly: "/verify"'
+   flow 2 (blocked): 'Open "Go to form"', 'Click "Submit"'   <- the
+     revisit-branch fix: reaches the SAME state as flow 1, correctly
+     blocked too, not read as an unremarkable "unique"
+
+3) start_url itself is the CAPTCHA page:
+   States=1 Flows=0 Checkpoints=1
+   checkpoint: start_url is itself behind a CAPTCHA/challenge page --
+   crawl stopped, nothing else is explorable
+```
+
+All four detectable markers correctly named together in one reason
+string; the unrelated "Ordinary link" flow unaffected; the CAPTCHA
+state recorded (visible in the graph as evidence) but never explored
+past. Regression check: a full saucedemo.com crawl (no CAPTCHA
+anywhere) is byte-for-byte unchanged in shape from the pre-feature
+baseline.
+
+Caught proactively while wiring this up, before it could cause a real
+bug: `RunResult.from_json()` reconstructs `StateNode` manually (not via
+`StateNode(**d)`) -- exactly the recurring bug class this project
+already watches for (`Flow.origin_note` needed the same explicit
+`.get()` treatment earlier). Without it, `captcha_detected` would have
+silently vanished from every StateNode reloaded from a saved
+`flows.json` (`flowscout gap`, `flowscout confirm`, the web UI's gap
+re-run) -- fixed with an explicit `s.get("captcha_detected", "")`,
+verified with a direct round-trip test before moving on.
+
+All 20 existing tests still pass; the fixture server and its port
+confirmed shut down; no leftover Playwright/headless-Chromium
+processes.
