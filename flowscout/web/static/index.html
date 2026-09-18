@@ -204,7 +204,7 @@ button.secondary {
     <p class="hint">Explored just like start_url — the crawler clicks around from each one too, not just visits it. Filtered by Allowed domains/Exclude URL patterns above, same as any other link.</p>
 
     <h2>Embeddings provider <button type="button" class="icon-btn help-trigger" data-help="embeddings-provider" title="What this affects and what 'unverified' means">?</button></h2>
-    <p class="hint">Used by both Semantic dedup and Gap analysis below — one choice for both, since a run only ever picks one provider. Only providers with a key set (see badges above) will actually work.</p>
+    <p class="hint">Used by both Semantic dedup and Gap analysis below — one choice for both, since a run only ever picks one provider. Only providers with a key set (see badges above — hover a "not set" one for exactly which env var and where) will actually work.</p>
     <label for="f-embeddings-provider">Provider</label>
     <select id="f-embeddings-provider"></select>
 
@@ -294,6 +294,7 @@ button.secondary {
 
       <h4 id="help-embeddings-provider">Embeddings provider</h4>
       <p>Both Semantic dedup and Gap analysis need a text-embeddings API call to compare flows/test cases by meaning, not just exact text. Gemini was the only option originally; OpenAI and Voyage AI (Anthropic's own recommended embeddings partner — Anthropic has no embeddings model of its own) were added so an operator without a Gemini key isn't stuck. <b>Gemini's integration is the one that's actually been exercised against real API calls, repeatedly, throughout this project's development. OpenAI's and Voyage's were built from each provider's documented API contract without a live key to test against — the ⚠ on their badge above means exactly that: verify with a real key before trusting the results, the same discipline every other feature here was held to.</b> The 0.95 (dedup) and 0.74 (gap analysis) thresholds below were both measured empirically against Gemini's own similarity distribution; a different provider's embedding space won't necessarily cluster the same way at the same numbers.</p>
+      <p><b>There is no field anywhere in this UI to type a key into</b> — deliberately, since a key like this should never pass through the browser/JS at all. Copy <code>.env.example</code> to <code>.env.local</code> in the project root, set that provider's line (e.g. <code>GEMINI_API_KEY=...</code> — hover a badge above for the exact name), and restart <code>flowscout serve</code>: it's a server-side env var, read once at process startup, so a key added while the server is already running won't show as "set" until it's restarted.</p>
 
       <h4>Semantic dedup — Enabled</h4>
       <p>An extra pass after the crawl (needs a key for whichever provider you picked above) that merges flows reading as the same thing even when their exact steps differ. Off by default cost, and the run still fully works without it — just structural + state-convergence dedup only, both free and always on regardless of this setting.</p>
@@ -427,8 +428,21 @@ async function loadStatus() {
     const label = name.charAt(0).toUpperCase() + name.slice(1);
     b.className = 'badge ' + (info.configured ? 'badge-ok' : 'badge-warn');
     b.textContent = label + (info.configured ? ': set' : ': not set');
+    // The "not set" case is exactly where an operator needs to know
+    // WHERE to actually put a key -- found missing directly from a live
+    // question: neither this badge nor the help-overlay text below said
+    // anything beyond "see badges above", even though key_env (e.g.
+    // "GEMINI_API_KEY") was already sitting right here in the API
+    // response, unused. There's no in-UI field for the key itself,
+    // deliberately -- it never flows through the browser/JS, only a
+    // server-side env var read once at process startup.
+    if (!info.configured) {
+      b.title = `Set ${info.key_env} in .env.local (copy .env.example) and restart flowscout serve -- ` +
+                'there is no key field in this UI on purpose.';
+    }
     if (!info.verified_live) {
-      b.title = 'This provider\'s integration was built without live API access and has not been ' +
+      b.title = (b.title ? b.title + ' ' : '') +
+                'This provider\'s integration was built without live API access and has not been ' +
                 'exercised against a real call -- verify before relying on it (see ROADMAP.md).';
       b.textContent += ' ⚠';
     }
