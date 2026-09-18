@@ -92,6 +92,22 @@ _DISCOVER_JS = r"""
         return first.replace(/\s+/g, ' ').trim().slice(0, 60);
     }
 
+    // Full, untruncated diagnostic text for a validation-error message --
+    // deliberately NOT firstBlockText() above, which is locator-safe-short
+    // (60 chars, first line only) by design for BUTTON/LINK LABELS, not
+    // error text. Found directly from a live question: a real, otherwise-
+    // correct detection ("alert:Epic sadface: Username and password do
+    // not match any user in") was silently cut off mid-sentence by
+    // reusing firstBlockText here, hiding exactly the diagnostic detail a
+    // QA engineer needs to actually read (the real saucedemo message
+    // continues "...in this service."). Capped at 500 chars, not
+    // unbounded, only to guard against a pathological role="alert"
+    // region that isn't really a short message at all -- no real,
+    // human-written validation message gets anywhere close to that.
+    function fullErrorText(raw) {
+        return (raw || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+    }
+
     // Real forms in modern JS apps commonly have no <form> element at
     // all -- React/Vue apps build "forms" as plain containers (a <div>
     // wrapping the fields) with a submit control marked type="button"
@@ -599,7 +615,7 @@ _DISCOVER_JS = r"""
         validationSignals.push('invalid-field:' + name);
     }
     for (const el of queryAllDeep(document, '[role="alert"]')) {
-        const msg = firstBlockText(el.innerText || '');
+        const msg = fullErrorText(el.innerText || '');
         if (msg) validationSignals.push('alert:' + msg);
     }
     // :user-invalid (NOT plain :invalid) -- verified live: :invalid
@@ -613,7 +629,7 @@ _DISCOVER_JS = r"""
     try {
         for (const el of queryAllDeep(document, ':user-invalid')) {
             const name = el.getAttribute('name') || el.id || el.tagName;
-            const msg = (el.validationMessage || '').trim().slice(0, 60);
+            const msg = fullErrorText(el.validationMessage || '');
             validationSignals.push('native-invalid:' + name + (msg ? ':' + msg : ''));
         }
     } catch (e) { /* :user-invalid unsupported -- aria-invalid/role=alert above still apply */ }

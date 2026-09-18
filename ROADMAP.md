@@ -4315,3 +4315,67 @@ verified with a direct round-trip test before moving on.
 All 20 existing tests still pass; the fixture server and its port
 confirmed shut down; no leftover Playwright/headless-Chromium
 processes.
+
+## Validation-error text was silently truncated at 60 characters (done, Sep 2026)
+
+Found directly from a live question: a user manually added a persona
+through the web UI, its login legitimately failed (see below for why),
+and the report showed `alert:Epic sadface: Username and password do
+not match any user in` -- clearly cut off mid-sentence, not the real
+saucedemo message. Checked `flows.json` directly, not just the
+rendered report, to rule out report.py truncating it for display: the
+STORED string was already exactly 66 characters (`"alert:"` + 60
+truncated characters), proving the cut happened at discovery time in
+`_DISCOVER_JS`, not at render time.
+
+Root cause: the `[role="alert"]` and `:user-invalid` branches of the
+validation-signal detection (added for "State fingerprint was blind to
+validation errors", above) reused `firstBlockText()` -- a helper
+deliberately designed to be locator-safe-SHORT (60 chars, first line
+only) for candidate LABELS, since it feeds `page.get_by_text()`
+locators and needs to stay short and unambiguous. Reusing it for
+diagnostic ERROR TEXT was the wrong tool for the job: a QA engineer
+reading a validation error wants the whole message, not a
+label-shaped fragment of it.
+
+Fixed with a dedicated `fullErrorText(raw)` helper -- same whitespace
+collapsing as `firstBlockText`, but capped at 500 characters (not 60)
+and not restricted to the first line/block. 500 is a deliberate,
+generous safety net against a pathological `role="alert"` region that
+isn't really a short message at all, not a real constraint on any
+actual human-written validation message. Verified live against the
+real saucedemo.com login error that prompted this: raw `innerText` is
+`"Epic sadface: Username and password do not match any user in this
+service"` (76 chars) -- previously truncated to `"...any user in"`,
+now captured in full end to end through the real `crawl()` pipeline,
+landing in `Transition.validation_errors` untouched.
+
+All 20 existing tests still pass; a full saucedemo.com crawl with
+correct credentials is unchanged in shape from the pre-fix baseline.
+
+### Separately, the persona that triggered this: why its login failed
+
+Investigating the actual run that surfaced the truncation bug also
+answered the user's other question -- why a manually-added persona's
+login failed at all, despite believing a real password was entered.
+The saved run config showed `"persona-1": {"credentials": {}}` --
+completely empty, not just wrong. With no credential keys to match,
+`_synth_value()` (`actions.py`) filled the form with its generic
+fallback values (`user-name="flowscout_test"`, a synthesized
+password) instead of anything resembling a real saucedemo account --
+correctly rejected, exactly as any other invalid-login attempt would
+be. Not a crawler bug: FlowScout behaved correctly given what it was
+actually told.
+
+Most likely mechanism, traced through the web UI's own
+`collectConfig()` (`index.html`): a persona's credential row only gets
+included if its FIELD-NAME input is non-empty --
+`if (kIn.value.trim()) creds[kIn.value.trim()] = vIn.value;`. Typing a
+password into the VALUE box while leaving the field-NAME box blank (a
+plausible slip -- `addPersonaBlock()` starts both boxes empty, with no
+placeholder text hinting a value alone isn't enough) gets the whole
+row silently dropped, with no warning anywhere that it happened.
+**Not yet fixed** -- flagged here as a real, disclosed UX gap
+(surfacing a warning when a persona ends up with empty credentials
+despite the operator having added one) rather than something guessed
+at and patched blind; a concrete next step if wanted.
