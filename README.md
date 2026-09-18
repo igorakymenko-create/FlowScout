@@ -79,6 +79,23 @@ The `playwright install` step downloads a Chromium build (~150 MB) —
 it's a one-time setup, not a FlowScout-specific quirk, but it's easy to
 miss and the first run will fail without it.
 
+## Try it in 30 seconds
+
+No config to write, no site to pick — this repo already ships a
+working example against [saucedemo.com](https://www.saucedemo.com/), a
+public practice site built for QA automation, plus a real 10-case TCMS
+export for it (`fixtures/tcms_saucedemo.csv`: login, add-to-cart,
+checkout, sort, logout, an invalid-login negative case, and more):
+
+```bash
+flowscout crawl --config configs/saucedemo.json --out runs/demo \
+  --tcms fixtures/tcms_saucedemo.csv
+```
+
+Open `runs/demo/report.html` when it finishes — every flow the crawler
+actually found, each one matched against those 10 test cases and
+marked covered, partially covered, or a gap.
+
 ## Quickstart
 
 Write a run config (see `configs/saucedemo.json` for a working
