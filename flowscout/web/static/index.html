@@ -266,7 +266,7 @@ button.secondary {
       <p>Where the crawl begins. Everything discovered has to be reachable by following links from here.</p>
 
       <h4>Credentials</h4>
-      <p>Field-name → value pairs. When the crawler finds a form (e.g. a login page), it fills each input by matching the input's <code>name</code>/<code>id</code>/<code>placeholder</code> against these keys — case-insensitive, substring match. So a key of <code>user-name</code> also matches an input literally named <code>username</code>. Fields that don't match anything get a synthetic safe value instead (e.g. <code>flowscout_test</code>) — never left blank, never guessed from the page.</p>
+      <p>Field-name → value pairs. When the crawler finds a form (e.g. a login page), it fills each input by matching a key against the input's <code>name</code>/<code>id</code>/<code>placeholder</code>/<code>data-test</code>/<code>data-testid</code> (all of them together, not just one) — case-insensitive, substring match. So a key of <code>user</code> matches an input named <code>user-name</code> just as well as one named <code>username</code> or marked <code>data-test="username"</code> — but the exact strings <code>user-name</code> and <code>username</code> do NOT match <em>each other</em> (the hyphen makes neither a substring of the other), so a key has to actually match something on the real page, not just look close to it. Use <b>🔍 Detect fields from site</b> above to see a page's real attribute values instead of guessing. Fields that don't match anything get a synthetic safe value instead (e.g. <code>flowscout_test</code>) — never left blank, never guessed from the page.</p>
 
       <h4 id="help-personas">Additional personas</h4>
       <p>Crawls the same site again as a different logged-in user, one persona after another (not in parallel — two personas can corrupt each other's results through shared server-side state, e.g. one resetting cart contents mid-crawl while another is still using them), all written into <b>one</b> report. Flows are kept separate per persona even when they look identical otherwise — an admin-only page an admin can reach and a standard user can't never collapses into "the same flow" just because the destination matches. Each persona gets the same Max states / Max flows budget the crawl would give a single persona, not a shared pool that a later persona could get starved out of. Leave this empty to crawl as just the one persona defined in Credentials above (the default, and the only behavior before this existed).</p>
@@ -381,10 +381,15 @@ document.getElementById('f-detect-fields').onclick = async () => {
       }
       const list = el('div', 'detect-fields-list');
       for (const f of data.fields) {
-        const attr = f.name || f.id || f.placeholder;
+        // Same priority order fill_enclosing_form's own display_name
+        // uses (actions.py) -- data-test/data-testid only as a last
+        // resort, for a field with no name/id/placeholder at all.
+        // Matching at replay time now considers ALL of these together,
+        // not just whichever one this suggestion happens to show.
+        const attr = f.name || f.id || f.placeholder || f.dataTest;
         const row = el('div', 'detect-field-row');
         const parts = [f.tag + (f.type ? ' · ' + f.type : ''),
-                        attr ? `"${attr}"` : '(no name/id/placeholder — not usable as a field name)'];
+                        attr ? `"${attr}"` : '(no name/id/placeholder/data-test — not usable as a field name)'];
         row.appendChild(el('span', 'mono', parts.join('  ')));
         if (attr) {
           const addBtn = el('button', 'link-btn', '+ use');

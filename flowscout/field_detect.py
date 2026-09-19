@@ -51,6 +51,13 @@ _FIELD_SCAN_JS = r"""
             id: el.id || '',
             placeholder: el.getAttribute('placeholder') || '',
             ariaLabel: el.getAttribute('aria-label') || '',
+            // Reported alongside name/id/placeholder (Sep 2026) --
+            // fill_enclosing_form's own credential matching (actions.py)
+            // now checks data-test/data-testid too, since it's often the
+            // FIRST thing a QA engineer looks at in devtools, not an
+            // afterthought. Surfacing it here keeps this suggestion tool
+            // honest about what actually gets matched at replay time.
+            dataTest: el.getAttribute('data-test') || el.getAttribute('data-testid') || '',
             inForm: !!el.closest('form'),
         });
     }

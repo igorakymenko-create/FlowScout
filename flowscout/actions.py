@@ -1362,14 +1362,33 @@ def fill_enclosing_form(page, el_meta: dict, credentials: dict) -> dict | None:
             type_ = (field.get_attribute("type") or "text").lower()
             if type_ in ("submit", "button", "checkbox", "radio", "hidden"):
                 continue
+            data_test = field.get_attribute("data-test") or field.get_attribute("data-testid") or ""
             name = (field.get_attribute("name") or field.get_attribute("id")
-                     or field.get_attribute("placeholder") or "")
+                     or field.get_attribute("placeholder") or data_test or "")
             display_name = name or tag
+            # match_key -- NOT just `name` above -- is what credentials
+            # actually get matched against (see _synth_value). Found
+            # directly from a live question: a real config used
+            # "username" as its credential key, saucedemo's real field
+            # is name="user-name"/id="user-name" (the hyphen defeats a
+            # substring match against "username"), and its OWN
+            # data-test="username" -- exactly what a QA engineer looks
+            # at first in devtools -- was silently never even consulted,
+            # so the login field got filled with the generic synthetic
+            # fallback instead, and every login attempt failed the same
+            # way. `name` above still picks ONE attribute (preferring
+            # name/id/placeholder, for the label shown in the report),
+            # but matching now considers all of them together, not just
+            # whichever one happened to win that preference order.
+            match_key = " ".join(filter(None, [
+                field.get_attribute("name"), field.get_attribute("id"),
+                field.get_attribute("placeholder"), data_test,
+            ]))
             if tag == "select":
                 field.select_option(index=1)
                 summary[display_name] = "(selected)"
             else:
-                value = _synth_value(name, type_, credentials)
+                value = _synth_value(match_key, type_, credentials)
                 field.fill(value)
                 summary[display_name] = "•" * min(len(value), 10) if type_ == "password" else value
         except Exception:

@@ -4379,3 +4379,62 @@ row silently dropped, with no warning anywhere that it happened.
 (surfacing a warning when a persona ends up with empty credentials
 despite the operator having added one) rather than something guessed
 at and patched blind; a concrete next step if wanted.
+
+## Credential matching ignored data-test/data-testid entirely (done, Sep 2026)
+
+A direct follow-up to the persona investigation above, once the
+*actual* cause of that failed login was found (empty credentials, not
+this) -- a separate, real question came out of it: the user's config
+used the key `"username"`, saucedemo's real field is
+`name="user-name"`/`id="user-name"` (the hyphen defeats a substring
+match against `"username"`), and the field's own
+`data-test="username"` -- exactly what a QA engineer opens devtools
+and looks at first, ahead of `name`/`id` -- was never even consulted.
+`fill_enclosing_form()` (`actions.py`) only ever built its matching
+string from `name || id || placeholder` (first non-empty wins, the
+rest discarded entirely, not even combined) -- so a config key that
+matches a field's `data-test` but nothing else silently gets the
+generic synthetic fallback value instead, with no error, no warning,
+just a login that quietly never succeeds.
+
+**Fixed** by building a separate `match_key` string for
+`_synth_value()`'s own substring matching -- ALL of `name`, `id`,
+`placeholder`, `data-test`, `data-testid` joined together, not just
+whichever one wins a first-non-empty preference order. The report's
+own `display_name` (what shows up in a flow's "Fill form and submit
+... (user-name=...)" label) keeps the original `name || id ||
+placeholder || data-test` preference order unchanged -- this only
+widens what MATCHES, not what gets displayed.
+
+Also extended to stay consistent with what actually gets matched:
+- `field_detect.py`'s `_FIELD_SCAN_JS` ("Detect fields from site") now
+  reports each field's `data-test`/`data-testid` alongside
+  name/id/placeholder, so the suggestion tool doesn't quietly omit the
+  one attribute a QA engineer is most likely to already know.
+- The web UI's own "+ use" suggestion (`index.html`) falls back to it
+  last, after name/id/placeholder, matching `display_name`'s own order.
+- The Credentials help-overlay text was also just plain wrong before
+  this: it claimed a key of `user-name` "also matches an input
+  literally named `username`" -- backwards from how substring matching
+  actually works (neither is a substring of the other; the hyphen
+  defeats it in both directions, which is the exact real bug that
+  prompted this whole investigation). Rewritten with an example that's
+  actually true (a key of `user` matches `user-name`, `username`, AND
+  `data-test="username"` alike) and a pointer at "Detect fields from
+  site" instead of guessing.
+
+**Verified live** by reproducing the user's own exact failure first --
+`credentials: {"username": "standard_user", "password": "secret_sauce"}`
+against real saucedemo.com produced the identical symptom confirmed in
+their own saved `flows.json` (login filled with the generic
+`flowscout_test` fallback, stuck at 2 states / 3 flows around the
+login page) -- then confirming the fix: the exact same config now logs
+in successfully and reaches the ordinary ~9-state, ~15-flow shape.
+`detect_fields()` against the same site now reports
+`"dataTest": "username"` alongside `name`/`id`/`placeholder`.
+Regression check: the original working config (`user-name` key)
+crawled against saucedemo.com is unchanged in shape.
+
+All 20 existing tests still pass; no leftover Playwright/headless-
+Chromium processes; no stray run artifacts (the verification scripts
+called `crawl()` directly, never wrote to `runs/`).
