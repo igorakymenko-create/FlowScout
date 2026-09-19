@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flowscout"
-version = "0.2.0"
+version = "0.3.0"
 description = "Autonomous browser agent that crawls a web app to discover real user flows and find test-coverage gaps against an existing test plan."
 readme = "README.md"
 requires-python = ">=3.10"
