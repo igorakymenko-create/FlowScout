@@ -45,7 +45,13 @@ verify quickly — it doesn't replace knowing what to point it at.
 - **Generates test-case drafts** (Markdown + a TCMS-importable CSV) and
   runnable `pytest-playwright` specs from what it found.
 - **Tracks changes across runs** for the same project, so a second
-  crawl can tell you what's new, what disappeared, and what moved.
+  crawl can tell you what's new, what disappeared, and what moved —
+  scoped by `"variant"` (a customer/tenant, feature-flag set, or
+  environment), so two configurations sharing one entry point never get
+  diffed against each other.
+- **States its own preconditions** in every report: which personas,
+  which configuration, which seeded URLs, which limits. A `not_found`
+  is always relative to those, and the report says so on its face.
 - **Multi-persona**: crawl the same site as multiple logged-in users
   (sequentially — see `ROADMAP.md` for why not in parallel) into one
   report, so admin-only flows and standard-user flows don't collapse

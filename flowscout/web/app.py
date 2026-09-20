@@ -341,13 +341,18 @@ async def explore_combination_endpoint(run_id: str, body: dict):
 
 
 @app.get("/api/projects/{project}/state")
-def get_project_state(project: str):
+def get_project_state(project: str, variant: str = ""):
     """The durable cross-run record (identity.py + project_state.py) --
     what flows have been seen, and what an operator has confirmed about
-    them. Separate from any single run's flows.json."""
+    them. Separate from any single run's flows.json.
+
+    `variant` scopes it to one configuration of the project (a customer
+    tenant, a feature-flag set, an environment) -- see
+    project_state.state_path. Omitted means the unscoped state file,
+    which is what every project written before variants existed uses."""
     from dataclasses import asdict
-    state = project_state_module.load(project)
-    return {"project": state.project, "start_url": state.start_url,
+    state = project_state_module.load(project, variant)
+    return {"project": state.project, "start_url": state.start_url, "variant": state.variant,
             "flows": {k: asdict(v) for k, v in state.flows.items()}}
 
 
@@ -357,7 +362,7 @@ async def confirm_link(project: str, body: dict):
     tcms_id = body.get("tcms_id")
     if not identity or not tcms_id:
         raise HTTPException(400, "identity and tcms_id are required")
-    runs_module.confirm_tcms_link(project, identity, tcms_id)
+    runs_module.confirm_tcms_link(project, identity, tcms_id, str(body.get("variant") or "").strip())
     return {"ok": True}
 
 
@@ -366,7 +371,8 @@ async def approve_flow(project: str, body: dict):
     identity = body.get("identity")
     if not identity:
         raise HTTPException(400, "identity is required")
-    runs_module.set_approved(project, identity, bool(body.get("approved", True)))
+    runs_module.set_approved(project, identity, bool(body.get("approved", True)),
+                              str(body.get("variant") or "").strip())
     return {"ok": True}
 
 

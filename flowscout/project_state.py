@@ -63,6 +63,13 @@ class ProjectState:
     # change_detection.py (environment_mismatch), not here -- this field
     # just carries the value that check compares against.
     start_url: str = ""
+    # Which CONFIGURATION of the project this state belongs to (Sep
+    # 2026) -- a per-customer tenant, a feature-flag set, an
+    # environment. Empty for every config written before this existed,
+    # which keeps their state file exactly where it already is. See
+    # state_path()/variant_of() for why this has to be part of the key
+    # rather than folded into the project name by hand.
+    variant: str = ""
     flows: dict[str, FlowRecord] = field(default_factory=dict)
 
     def record_seen(self, identity: str, run_id: str, content_hash: str, summary: str) -> FlowRecord:
@@ -103,17 +110,46 @@ class ProjectState:
         return None
 
 
-def state_path(project: str) -> Path:
-    return PROJECTS_DIR / _slugify(project) / "state.json"
+def variant_of(config: dict) -> str:
+    """The configuration label a run was crawled under, from
+    `config["variant"]` -- a per-customer tenant, a feature-flag set, an
+    environment name. Free-form and operator-chosen on purpose: FlowScout
+    has no way to detect from outside which customer's customization or
+    which flag set it is looking at, and guessing one (hashing the
+    config, say) would silently split or merge baselines whenever an
+    unrelated setting changed. Empty when unset, which is every config
+    written before this existed."""
+    return str(config.get("variant") or "").strip()
 
 
-def load(project: str) -> ProjectState:
-    path = state_path(project)
+def state_path(project: str, variant: str = "") -> Path:
+    """`projects/<project>/state.json`, or
+    `projects/<project>/variants/<variant>/state.json` when a variant is
+    set.
+
+    Why the variant has to be part of the path (Sep 2026, raised
+    directly by a skeptical user): project state is what change
+    detection compares a new crawl against, and it was keyed by project
+    NAME alone. Crawl customer A, then crawl customer B under the same
+    project name, and B is diffed against A's baseline -- every flow
+    unique to A reads as "missing since last run" and every flow unique
+    to B as "new", when in reality nothing changed in either system.
+    The same applies to one tenant crawled with a feature flag on and
+    then off. Folding the variant into the project name by hand would
+    work too, but it would also fragment the RUN history and the
+    reports, which genuinely do belong to one project."""
+    base = PROJECTS_DIR / _slugify(project)
+    return base / "variants" / _slugify(variant) / "state.json" if variant else base / "state.json"
+
+
+def load(project: str, variant: str = "") -> ProjectState:
+    path = state_path(project, variant)
     if not path.exists():
-        return ProjectState(project=project)
+        return ProjectState(project=project, variant=variant)
     data = json.loads(path.read_text(encoding="utf-8"))
     flows = {k: FlowRecord(**v) for k, v in data.get("flows", {}).items()}
-    return ProjectState(project=data.get("project", project), start_url=data.get("start_url", ""), flows=flows)
+    return ProjectState(project=data.get("project", project), start_url=data.get("start_url", ""),
+                         variant=data.get("variant", variant), flows=flows)
 
 
 def record_run(run: RunResult, run_id: str) -> ProjectState:
@@ -122,7 +158,7 @@ def record_run(run: RunResult, run_id: str) -> ProjectState:
     bookkeeping, no operator action required for this part. Duplicate
     and blocked flows aren't recorded: they don't represent something an
     operator would link to a test case or approve for codegen."""
-    state = load(run.project)
+    state = load(run.project, variant_of(run.config))
     if not state.start_url:
         state.start_url = run.start_url
     for flow in run.flows:
@@ -137,11 +173,12 @@ def record_run(run: RunResult, run_id: str) -> ProjectState:
 
 
 def save(state: ProjectState) -> None:
-    path = state_path(state.project)
+    path = state_path(state.project, state.variant)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "project": state.project,
         "start_url": state.start_url,
+        "variant": state.variant,
         "flows": {k: asdict(v) for k, v in state.flows.items()},
     }
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")

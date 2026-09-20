@@ -654,6 +654,73 @@ def _skipped_html(run: RunResult) -> str:
     </table>"""
 
 
+def _run_envelope_html(run: RunResult) -> str:
+    """The conditions this crawl actually ran under -- which identities,
+    which configuration, what it was allowed to reach.
+
+    Added (Sep 2026) in answer to a skeptical, and correct, question: a
+    report that lists "gap" and "not found" without stating its own
+    preconditions reads as if it surveyed the whole system. It didn't,
+    and can't -- it surveyed what THESE identities could reach in THIS
+    system state. Every result below is relative to exactly this, and
+    saying so on the face of the report is the difference between an
+    honest scope and an implied claim nobody made out loud. See
+    ROADMAP.md's "undiscovered vs. uncovered" entry.
+    """
+    cfg = run.config
+    items: list[str] = []
+
+    variant = str(cfg.get("variant") or "").strip()
+    if variant:
+        items.append(f'<span class="meta-item"><b>configuration</b> {_esc(variant)}</span>')
+
+    personas = cfg.get("personas")
+    if personas:
+        names = ", ".join(str(p.get("name", "default")) for p in personas)
+        items.append(f'<span class="meta-item"><b>personas</b> {_esc(names)}</span>')
+    else:
+        creds = cfg.get("credentials") or {}
+        items.append(
+            '<span class="meta-item"><b>identity</b> '
+            + ("single persona, credentials supplied" if creds else "anonymous (no credentials)")
+            + "</span>"
+        )
+
+    if cfg.get("storage_state"):
+        items.append('<span class="meta-item"><b>session</b> pre-authenticated (storage_state)</span>')
+
+    seeds = cfg.get("seed_urls") or []
+    sitemap = cfg.get("sitemap_url")
+    if seeds or sitemap:
+        parts = []
+        if seeds:
+            parts.append(f"{len(seeds)} seed URL(s)")
+        if sitemap:
+            parts.append("sitemap")
+        items.append(f'<span class="meta-item"><b>seeded from</b> {_esc(" + ".join(parts))}</span>')
+
+    domains = cfg.get("allowed_domains") or []
+    if domains:
+        items.append(f'<span class="meta-item"><b>allowed domains</b> {_esc(", ".join(domains))}</span>')
+
+    excludes = cfg.get("exclude_patterns") or []
+    if excludes:
+        items.append(f'<span class="meta-item"><b>excluded</b> {len(excludes)} URL pattern(s)</span>')
+
+    note = (
+        "Everything below is scoped to these conditions. A flow that isn't here may simply be "
+        "unreachable for these identities, in this configuration, with this data — "
+        "&ldquo;not found&rdquo; means <b>this crawl didn't reach it</b>, never that it doesn't exist."
+    )
+    if not variant:
+        note += (
+            ' No configuration label was set for this run — set <span class="mono">"variant"</span> in the config '
+            "(a customer/tenant, feature-flag set, or environment) to keep change detection from comparing "
+            "two different configurations against each other."
+        )
+    return f'<div class="meta-row">{"".join(items)}</div>\n  <p class="subhead">{note}</p>'
+
+
 def _checkpoints_html(run: RunResult) -> str:
     if not run.checkpoints:
         return '<p class="empty">No checkpoints raised — the run completed without errors or ambiguous states.</p>'
@@ -859,6 +926,7 @@ def render_html(run: RunResult, gap: GapAnalysis | None = None, changes: ChangeR
     coverage_gaps_html = _coverage_gaps_html(run)
     skipped_html = _skipped_html(run)
     checkpoints_html = _checkpoints_html(run)
+    envelope_html = _run_envelope_html(run)
     cfg = run.config
     limits = cfg.get("limits", {})
 
@@ -1041,6 +1109,9 @@ a {{ color: var(--accent); }}
     <span class="meta-item"><b>max repeats/action</b> {_esc(limits.get('max_action_repeat', 2))}</span>
     <span class="meta-item"><b>mutating actions</b> {'allowed' if cfg.get('allow_mutating') else 'withheld'}</span>
   </div>
+
+  <h2>Run conditions</h2>
+  {envelope_html}
 
   <div class="metrics">
     <div class="metric"><div class="num">{s['states_discovered']}</div><div class="lbl">states discovered</div></div>

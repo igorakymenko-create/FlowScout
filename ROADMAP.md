@@ -4641,3 +4641,98 @@ business, not something this or any other purely technical crawling
 approach replaces. FlowScout's honest job is amplifying that human's
 reach into the areas they DO already know about, not replacing their
 knowledge of what to look for.
+
+## Run conditions in the report, and per-configuration change baselines (done, Sep 2026)
+
+Direct follow-up to the entry above. Re-reading that skeptic's list
+with a colder eye, most of it turns out NOT to be an epistemic limit at
+all -- it's an access-and-setup question with a precise answer:
+
+- **Permissions**: provision the persona with the role you want
+  covered. Don't, and you correctly don't see those flows.
+- **Feature flags**: a flag that's off *definitionally* means "this
+  does not exist for this user". Reporting it as absent is the correct
+  answer, not a blind spot.
+- **Per-customer customization**: arguably where crawling BEATS
+  spec-derived test design -- the crawler reads the UI actually
+  deployed for that customer, not the one the documentation describes.
+- **Data conditions**: stand up the fixture data, same as any other
+  form of testing has always required.
+
+The precise claim FlowScout can defend is therefore narrower and much
+firmer than "we might be missing something": **"here is what this
+identity could reach, in this system state."** Two things were missing
+before that claim held up in practice, and both came straight out of
+that re-reading:
+
+**1. The report never stated its own preconditions.** A reader saw
+"gap" and "not found" with no statement of which identities, which
+configuration, which seeds, or which limits produced them -- so a
+scoped result read as an absolute one. Added a **Run conditions**
+section (`_run_envelope_html`, report.py) directly under the header:
+configuration label, personas (names only, never credential values),
+whether a pre-authenticated `storage_state` was supplied, how many
+seed URLs / whether a sitemap was used, allowed domains, exclude-
+pattern count -- followed by an explicit line that everything below is
+scoped to exactly those conditions and that "not found" means "this
+crawl didn't reach it", never "it doesn't exist".
+
+**2. Change detection compared different configurations against each
+other.** `project_state.state_path()` was keyed by project NAME alone,
+so two customers (or one customer with a feature flag on and then off)
+crawled under one project name shared a single baseline.
+
+Verified the bug before fixing it, not assumed: two "tenants" on one
+fixture server, each with one flow the other lacks, crawled in
+sequence under the same project name --
+
+```
+WITHOUT variant -- customer B crawled after customer A, same project name:
+  baseline=False  missing=1  new=1
+    MISSING (false alarm): Open "Alpha feature"
+```
+
+Customer A's flow reported as *missing* when nothing changed in either
+system. Fixed by adding an operator-set `config["variant"]` (a
+customer/tenant, feature-flag set, or environment) folded into the
+state key: `projects/<project>/variants/<variant>/state.json`.
+Deliberately operator-chosen rather than derived -- FlowScout cannot
+tell from outside which customer's customization it is looking at, and
+hashing the config to guess would silently split or merge baselines
+whenever any unrelated setting changed. Threaded through
+`load`/`save`/`record_run`/`detect_changes`, the CLI (`confirm
+--variant`), and the web API (`?variant=` / body field), with a form
+field and help entry in the operator UI. Empty variant keeps the
+original path byte-for-byte, so every config written before this keeps
+its existing state file and history.
+
+Verified live end to end on a local fixture: two variants under one
+project name keep independent baselines (beta's first crawl reads as
+its own baseline with zero false "missing"; alpha's re-crawl still
+sees its own history and reports nothing missing), separate state
+files are written per variant with no unscoped file created, and a
+variant-less run still lands on the original path and behaves exactly
+as before. The rendered report carries the Run conditions section, the
+configuration label, and the scoping caveat.
+
+**Still genuinely unsolved, and narrower than the original list** --
+none of these are fixable by handing the crawler more permissions:
+- **Multi-actor handoffs.** Employee submits → *manager* approves →
+  employee sees the result. Personas crawl sequentially and
+  independently; there is no coordinated handoff between them, and one
+  super-user cannot reproduce a flow that requires two actors in
+  sequence.
+- **One-shot / irreversible transitions.** The whole architecture is
+  reset-and-replay (see this file's top). "Activate account", "consume
+  this token", "final approval" cannot be re-walked against the same
+  backend entity.
+- **Time-dependent flows.** Anything gated behind a scheduler or a
+  30-day wait.
+- **Integrations that leave the allowed domain.** `risk.py` classifies
+  any off-domain navigation as DESTRUCTIVE and never follows it, so a
+  real "pay at external provider → return to the shop" round trip is
+  never walked. A bounded excursion (N steps off-domain, then back)
+  is a plausible design, not yet built.
+
+All 20 existing tests still pass; test project state cleaned up; no
+leftover Playwright/headless-Chromium processes.

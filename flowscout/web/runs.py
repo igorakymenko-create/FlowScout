@@ -92,7 +92,7 @@ def _execute(run_id: str, config: dict, tcms_path: Optional[str] = None,
             # load_tcms_csv() raising on a genuinely bad file.
             try:
                 tcms_items = load_tcms_csv(tcms_path)
-                state = project_state_module.load(run.project)
+                state = project_state_module.load(run.project, project_state_module.variant_of(run.config))
                 gap = analyze_gaps(run, tcms_items, tcms_source=tcms_path,
                                     threshold=gap_threshold, project_state=state)
                 (out_dir / "gap_analysis.json").write_text(json.dumps(gap.to_json(), indent=2), encoding="utf-8")
@@ -269,7 +269,7 @@ def run_gap_analysis(run_id: str, tcms_path: str, threshold: float = DEFAULT_THR
         raise FileNotFoundError(f"no completed run at {run_id}")
     run = RunResult.from_json(json.loads(flows_path.read_text(encoding="utf-8")))
     tcms_items: list[TcmsItem] = load_tcms_csv(tcms_path)
-    state = project_state_module.load(run.project)
+    state = project_state_module.load(run.project, project_state_module.variant_of(run.config))
     gap = analyze_gaps(run, tcms_items, tcms_source=tcms_path, threshold=threshold, project_state=state)
     (out_dir / "gap_analysis.json").write_text(json.dumps(gap.to_json(), indent=2), encoding="utf-8")
     # Regenerating report.html here shouldn't silently drop a change-report
@@ -497,13 +497,13 @@ def explore_combination_in_run(run_id: str, state_fp: str, candidate_indices: li
     return {"run": run, "delta": delta}
 
 
-def confirm_tcms_link(project: str, identity: str, tcms_id: str) -> None:
-    state = project_state_module.load(project)
+def confirm_tcms_link(project: str, identity: str, tcms_id: str, variant: str = "") -> None:
+    state = project_state_module.load(project, variant)
     state.confirm_tcms_link(identity, tcms_id)
     project_state_module.save(state)
 
 
-def set_approved(project: str, identity: str, approved: bool) -> None:
-    state = project_state_module.load(project)
+def set_approved(project: str, identity: str, approved: bool, variant: str = "") -> None:
+    state = project_state_module.load(project, variant)
     state.set_approved(identity, approved)
     project_state_module.save(state)

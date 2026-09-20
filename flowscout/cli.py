@@ -18,7 +18,7 @@ from .tcms import load_tcms_csv
 def _run_gap_analysis(run: RunResult, tcms_path: str, threshold: float) -> GapAnalysis:
     tcms_items = load_tcms_csv(tcms_path)
     print(f"[flowscout] gap analysis: {len(tcms_items)} TCMS items from {tcms_path} ...", file=sys.stderr)
-    state = project_state.load(run.project)
+    state = project_state.load(run.project, project_state.variant_of(run.config))
     gap = analyze_gaps(run, tcms_items, tcms_source=tcms_path, threshold=threshold, project_state=state)
     print(f"[flowscout] gap analysis: {gap.status}", file=sys.stderr)
     return gap
@@ -67,7 +67,7 @@ def cmd_crawl(args) -> None:
     out_dir = Path(args.out)
     state = project_state.record_run(run, run_id=out_dir.name)
     print(f"[flowscout] project state: {len(state.flows)} known flow identities "
-          f"({project_state.state_path(run.project)})", file=sys.stderr)
+          f"({project_state.state_path(run.project, project_state.variant_of(run.config))})", file=sys.stderr)
 
     _write_outputs(run, out_dir, gap, changes)
 
@@ -92,7 +92,10 @@ def cmd_gap(args) -> None:
 
 
 def cmd_confirm(args) -> None:
-    state = project_state.load(args.project)
+    # --variant must match whatever the crawl ran under, or this writes
+    # a confirmation into the wrong (or a brand-new) state file --
+    # see project_state.state_path for why the variant is part of the key.
+    state = project_state.load(args.project, (args.variant or "").strip())
     if args.tcms_id:
         rec = state.confirm_tcms_link(args.identity, args.tcms_id)
         print(f"[flowscout] confirmed: flow identity {args.identity} -> TCMS {args.tcms_id}", file=sys.stderr)
@@ -146,6 +149,9 @@ def main(argv=None):
     p_confirm = sub.add_parser(
         "confirm", help="record an operator decision against a flow identity (survives re-crawls)")
     p_confirm.add_argument("--project", required=True, help="project name (as used in the run config)")
+    p_confirm.add_argument("--variant", default="",
+                            help="configuration label the crawl ran under (config's \"variant\": a customer/tenant, "
+                                 "feature-flag set, or environment) -- must match, or this targets a different state file")
     p_confirm.add_argument("--identity", required=True, help="flow identity, from a gap-analysis or report output")
     p_confirm.add_argument("--tcms-id", help="confirm this flow corresponds to this TCMS case id")
     p_confirm.add_argument("--approve", action="store_true", help="approve this flow for future test-case codegen")

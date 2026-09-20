@@ -62,7 +62,7 @@ def detect_changes(run: RunResult, gap: GapAnalysis | None = None) -> ChangeRepo
     module docstring's "new events linked to gap analysis" note. Pass
     it in even though it means calling this *after* analyze_gaps() now,
     not before; recording project state still has to happen after both."""
-    prior = project_state_module.load(run.project)
+    prior = project_state_module.load(run.project, project_state_module.variant_of(run.config))
     baseline = len(prior.flows) == 0
 
     env_mismatch = None
