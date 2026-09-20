@@ -4571,3 +4571,73 @@ unmodified baseline.
 
 All 20 existing tests still pass; no leftover Playwright/headless-
 Chromium processes.
+
+## Known limitation — "undiscovered" and "uncovered" are not the same thing (raised Sep 2026; not solvable by this tool alone)
+
+A skeptical piece of LinkedIn feedback raised the sharpest question
+this project has gotten yet, and it deserves a straight answer rather
+than a defensive one: how do we know the flows FlowScout finds are the
+complete picture? In a real enterprise system, behavior is routinely
+gated by permissions, feature flags, per-customer customization,
+integrations, backend data conditions, and undocumented business
+process -- none of it visible from navigation alone. If a workflow
+transition is gated behind one of these, a gap-analysis report can
+look complete while silently missing exactly the highest-risk,
+least-documented part of the system -- often the part most worth
+testing.
+
+**The honest answer: FlowScout cannot tell "this doesn't exist" apart
+from "we didn't know to look for it," and does not claim to.** Every
+"gap"/"not_found" in a report is scoped narrowly -- it means "this TCMS
+item didn't match any flow THIS crawl actually found," never "this
+behavior doesn't exist in the app." The found-flow set is a floor on
+real system behavior, not a ceiling, and nothing in this project
+computes or reports a measure of how close that floor is to the
+ceiling -- because nothing CAN, from outside the app, without already
+knowing what's being missed. This is not unique to FlowScout: any
+automated-discovery-based testing approach (fuzzing, model-based
+testing, even a human writing test cases from a spec) has the same
+fundamental limit -- you cannot test what you don't know exists. What
+would be dishonest is a report that reads as more complete than this.
+
+**What already exists, and exactly what it does and doesn't solve --
+each one requires a human to already suspect the gated behavior, none
+of them solve the unknown-unknown case:**
+- Multi-persona crawling (`personas` in config) surfaces
+  permission-gated differences -- IF an operator configures a persona
+  for each role worth checking. A role nobody thought to add is
+  invisible, same as before.
+- `storage_state`/`credentials` gets past an auth wall -- IF the
+  operator has a working login for it. A customer-specific tenant this
+  crawler was never pointed at is invisible.
+- `explore_combination()` (see ROADMAP.md's own "conjunctive
+  multi-parameter gating" entry above) lets a human hand over a
+  SPECIFIC parameter combination DFS can't find alone -- only once a
+  human already suspects it matters enough to try.
+- `seed_urls`/`sitemap_url` reaches a page with no inbound link -- only
+  for a URL someone already knows about.
+- None of these -- individually or together -- reach a feature flag
+  nobody mentioned, an integration callback that only fires under real
+  production conditions, or a workflow that only exists because of a
+  business decision made years ago and never written down anywhere a
+  crawler (or a new hire) could find it.
+
+**What still has real value despite this, stated plainly rather than
+oversold:** the reachable surface FlowScout DOES cross is real,
+verified behavior, not a guess -- cheaper and more thorough to check
+this way than by hand, for exactly the "large, undifferentiated,
+tedious to manually re-test" part of an app most QA time actually goes
+to. And a TCMS item that comes back `not_found` is itself a genuine,
+actionable signal even under this limitation: either the documented
+flow doesn't exist the way the test case describes anymore, or it
+exists behind a condition this run didn't have configured -- both are
+worth a human's attention, and the report says which of the disclosed
+reasons applies (`skipped_candidates` names anything withheld by risk
+policy, a limit, or a persona gap) rather than pretending "not found"
+always means the same thing. The genuinely hard part the feedback
+names correctly -- finding the highest-risk, least-documented
+workflows nobody wrote down -- stays a job for a human who knows the
+business, not something this or any other purely technical crawling
+approach replaces. FlowScout's honest job is amplifying that human's
+reach into the areas they DO already know about, not replacing their
+knowledge of what to look for.

@@ -10,6 +10,16 @@ verify by exploring the app: which flows exist, which of your TCMS test
 cases match them, and which don't. That's a narrower promise than "AI
 writes your tests for you" — and a more honest one.
 
+One more honest boundary, worth stating up front rather than letting a
+report imply otherwise: a `not_found`/`gap` result means a TCMS item
+didn't match anything *this crawl found* — not that the described
+behavior doesn't exist in the app. Permissions, feature flags,
+per-customer customization, and undocumented business process can all
+gate a real workflow behind something FlowScout was never told to look
+for; see `ROADMAP.md`'s "undiscovered vs. uncovered" entry for the
+full reasoning. FlowScout amplifies how much of an app a human can
+verify quickly — it doesn't replace knowing what to point it at.
+
 ## What it does
 
 - **Crawls** a site with Playwright (DFS, isolated browser context per
