@@ -60,6 +60,10 @@ writes your tests for you" — and a more honest one.
   logic from there onward, not just visited once — finding pages with
   no inbound link anywhere in the crawled UI (a deep-linked SPA route,
   an old landing page delisted from navigation).
+- **Starts already authenticated** via `"storage_state"` (a Playwright
+  storage-state file from a manual login, or the state inline) — every
+  context, including seed URLs, begins logged in, so auth-walled pages
+  never redirect to a login screen instead of the real content.
 - A **local operator UI** (FastAPI + vanilla JS, no build step) to
   configure and run crawls, attach a TCMS export, and browse reports —
   or drive all of this from the CLI / a CI job instead.
