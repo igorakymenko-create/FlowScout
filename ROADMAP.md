@@ -4438,3 +4438,136 @@ crawled against saucedemo.com is unchanged in shape.
 All 20 existing tests still pass; no leftover Playwright/headless-
 Chromium processes; no stray run artifacts (the verification scripts
 called `crawl()` directly, never wrote to `runs/`).
+
+## Auth-walled apps: seed URLs redirected to login, and a crash on network failure (done, Sep 2026)
+
+A second, much more technical piece of LinkedIn feedback: a user
+piloted FlowScout against OrangeHRM (a real, complex Vue-based HR
+SPA -- the public demo instance, not a fixture), reporting three
+concrete issues with logs and a patch diff attached. Investigated by
+reproducing all of it directly against the same live site
+(`opensource-demo.orangehrmlive.com`, public `Admin`/`admin123` demo
+credentials) before touching any code, per this project's own standing
+discipline.
+
+**Issue 1 -- seed_urls all redirected to /auth/login.** Reproduced
+exactly: 5 seed URLs pointed at auth-walled Admin/PIM pages, all 5
+collapsed into one indistinguishable "reached the login page" flow.
+Root cause: `_run_path()` visits every seed URL from a brand-new,
+unauthenticated browser context (this project's own reset+replay
+design, deliberately isolated per path) -- `credentials` alone can't
+fix this, since filling and submitting a login form is itself an
+ACTION this crawler only ever performs by exploring to it, not
+something a bare direct-nav step does on its own.
+
+The user's own patch worked around it by finding whichever root-
+discovered candidate's label or norm_signature contained the substring
+"login" and replaying it before each seed -- and reported the
+predictable symptom: "Login now shows in flows but stays revisit vs
+manual ok -- likely locator." **Not adopted** -- this is a guess about
+which candidate is the right one, AND an English-text-dependent
+heuristic, the exact class of fragility this project already rejected
+once for field_detect.py's own login-trigger matching (see that
+module's own docstring). Built `config["storage_state"]` support
+instead (a path to a Playwright storage-state JSON file, or the state
+dict inline -- Playwright's own `new_context()` accepts either form
+natively): every fresh context, root discovery included, starts
+already logged in, so ordinary DFS naturally reaches an authenticated
+app's real content and every seed_urls entry lands on its actual
+destination -- no heuristic about which candidate is "the" login
+control, no English-text dependency, no separate login replay step at
+all. Verified live: with a real saved OrangeHRM session, both seed
+URLs (`/admin/viewAdminModule`, `/pim/viewPimModule`) correctly landed
+on their real destinations (`/admin/viewSystemUsers`,
+`/pim/viewEmployeeList`) as two distinct, correctly-labeled flows,
+where before they collapsed into one login-page duplicate.
+
+**Issue 2 -- "SPA nav blocked" navigating into Admin/PIM.** Traced to
+two compounding causes, both found live, neither guessed:
+
+1. A genuine SPA-rendering timing gap: OrangeHRM's dashboard is a
+   Vue app whose real nav only appears after its own async data-fetch
+   resolves, well after Playwright's `load` event fires. Measured
+   live: 0 real candidates 200ms after `load` (this crawler's own
+   flat wait at the time), 34 real ones roughly 3 seconds later.
+   Neither `page.wait_for_load_state("load")` (fires on the initial
+   HTML/JS/CSS, before the app's own JS has fetched or rendered
+   anything) nor the existing `_settle()` (CSS animations only, not an
+   XHR-driven re-render) covered this at all.
+
+   First fix attempt -- calling a new `_wait_for_render()` (a bounded
+   `page.wait_for_load_state("networkidle", ...)`) unconditionally
+   after every navigation/click -- was WRONG, caught by measuring it,
+   not by inspection: it fixed OrangeHRM but nearly tripled a full
+   saucedemo.com crawl's runtime (saucedemo's own ordinary background
+   traffic alone takes ~2.7s to naturally go network-idle) and,
+   independently, sampled saucedemo's own dynamic-catalog/spinner/
+   lazy-load pages (deliberately progressive-loading test fixtures) at
+   different points in their own loading lifecycle across different
+   DFS branches, multiplying one real state into several spurious ones
+   with different candidate counts each time (confirmed live:
+   `inventory.html` alone showed up 3 times in one run, with 27/29/32
+   candidates). **Reverted** in favor of calling `_wait_for_render()`
+   only when `_discover_state()` (crawler.py) finds LITERALLY nothing
+   at all -- no candidates, no occluded elements, no unclassified ones
+   either. An ordinary, already-rendered page (including one still
+   mid-way through loading MORE content) is accepted exactly as
+   before and pays nothing extra; only a genuinely blank-so-far page
+   retries, once, after a bounded wait. Separately confirmed the
+   saucedemo timing/count instability itself is real but PRE-EXISTING
+   and unrelated to this fix -- reproduced byte-for-byte identically
+   (same 12 states, same candidate counts, same runtime) against the
+   unmodified `git stash`-ed baseline with none of this session's
+   changes applied at all.
+
+2. A real, independent robustness bug, found only because the public
+   demo server it was being tested against turned out to be
+   intermittently slow: `_run_path()`'s own initial
+   `page.goto(config["start_url"], wait_until="load")` -- unlike
+   every step inside its per-path loop, and unlike this same
+   function's final `_discover_state()` call -- ran completely
+   outside any try/except. A transient navigation failure here (which
+   this function hits on EVERY single replay, not just root
+   discovery) crashed the entire `crawl()` call with an uncaught
+   exception instead of degrading to a checkpoint like every other
+   navigation failure in this codebase's own documented behavior.
+   Reproduced live against the flaky demo server, fixed by wrapping
+   both the initial goto and the final `_discover_state()` call in the
+   same checkpoint-and-return-None pattern the per-step loop already
+   used. Verified the fix's actual value live, not just that it
+   compiles: one retry run hit exactly this navigation timeout on its
+   very first replay, logged a clean checkpoint, and the crawl
+   continued regardless -- reaching 34+53+78 candidates across
+   multiple authenticated states in the SAME run, instead of the
+   whole process dying right there.
+
+**Built:**
+- `_run_path()` (`crawler.py`): `config.get("storage_state")` passed to
+  `browser.new_context()` when set; a failure loading it degrades to a
+  checkpoint (this call returns `None`) instead of crashing or silently
+  falling back to an unauthenticated context with no signal that
+  happened. The initial `page.goto()` and the final `_discover_state()`
+  call are now both wrapped the same way.
+- `actions.py`: new `_wait_for_render()` helper (bounded
+  `networkidle` wait, 5s default).
+- `crawler.py`'s `_discover_state()`: calls it, once, only when a
+  discovery pass finds nothing at all.
+
+**Verified live, through the full real `crawl()` pipeline, against
+OrangeHRM's real public demo instance:** seed URLs into Admin/PIM
+correctly authenticated and landed on their real destinations;
+candidate counts at every level (dashboard 34, admin/viewSystemUsers
+24-63, pim/viewEmployeeList 51-79) matched a fully-rendered page, not
+an empty one; DFS explored multiple levels deep into both modules
+(reaching `pim/updatePassword`, `pim/configurePim`, `help/support`);
+a genuine mid-crawl navigation timeout degraded to a checkpoint and the
+crawl continued productively instead of dying. Regression check: a
+full saucedemo.com crawl is unaffected by the conditional
+`_wait_for_render` (never triggers there, since saucedemo's pages
+always show at least some candidates immediately) and its own
+dynamic-catalog-driven state-count variance was confirmed pre-existing
+and unrelated via a direct `git stash` comparison against the
+unmodified baseline.
+
+All 20 existing tests still pass; no leftover Playwright/headless-
+Chromium processes.

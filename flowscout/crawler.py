@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from urllib.parse import urlsplit
 
-from .actions import discover_candidates, perform_action, current_domain, describe_action
+from .actions import discover_candidates, perform_action, current_domain, describe_action, _wait_for_render
 from .fingerprint import normalize_url, state_fingerprint
 from .models import (
     Checkpoint, ElementCandidate, Flow, FlowStatus, Risk, RunResult, StateNode, Transition,
@@ -156,6 +156,34 @@ def _discover_state(page, allowed_domains, run: RunResult
     exclude_patterns = run.config.get("exclude_patterns", [])
     candidates, occluded, unclassified, disabled, validation_signals, captcha_signals = discover_candidates(
         page, domain, allowed_domains, exclude_patterns)
+    if not candidates and not occluded and not unclassified:
+        # Found literally nothing at all -- could be a genuinely empty
+        # page, or a modern SPA whose own async data-fetch-then-render
+        # cycle (see actions._wait_for_render's own docstring) simply
+        # hasn't finished yet: verified live on a real production app
+        # (OrangeHRM, not a fixture) that showed 0 candidates 200ms
+        # after its dashboard's own `load` event, and 34 real ones
+        # ~3 seconds later. Retried ONCE, after a bounded network-idle
+        # wait, rather than waiting unconditionally on every single
+        # discovery regardless of need -- tried that first and reverted
+        # it after measuring the real cost live: saucedemo's own
+        # ordinary background traffic alone takes ~2.7s to naturally
+        # quiet down, and unconditionally paying that on every action
+        # made an ALREADY-rendered, already-correct page get re-sampled
+        # at a different point in ITS OWN progressive loading (a
+        # dynamic-catalog/spinner/lazy-load page, exactly the kind
+        # saucedemo already tests) -- multiplying one real state into
+        # several spurious ones with different candidate counts each
+        # time, confirmed live (inventory.html alone showed up 3 times
+        # with 27/29/32 candidates in one run). Confining the extra
+        # wait to "found NOTHING at all" means a page with ANY
+        # candidates already visible -- including one still mid-way
+        # through loading more -- is accepted exactly as before this
+        # existed, and only a genuinely blank-so-far page pays this
+        # cost, once.
+        _wait_for_render(page)
+        candidates, occluded, unclassified, disabled, validation_signals, captcha_signals = discover_candidates(
+            page, domain, allowed_domains, exclude_patterns)
     # validation_signals folded into the fingerprint itself (not just
     # reported afterward, like dialog_message/response_status are) --
     # see actions.py's discover_candidates docstring and Transition.
@@ -203,8 +231,46 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
     `credentials` is passed in rather than read from `config` directly
     so each persona's own pass (see crawl()) can supply its own -- the
     only thing that actually differs between two personas walking the
-    same replay path."""
-    context = browser.new_context()
+    same replay path.
+
+    `config.get("storage_state")` (Sep 2026), when set, seeds every
+    fresh context with an already-authenticated session (cookies/
+    localStorage) -- either a path to a Playwright storage-state JSON
+    file (`context.storage_state(path=...)` after a manual login) or
+    the state dict inline; Playwright's own `new_context()` accepts
+    either form natively, so it's passed straight through unexamined.
+    Found directly from a live question: seed_urls (see crawl()'s own
+    seeding loop) visits each URL from a brand-new, unauthenticated
+    context -- on an auth-walled app, every single seed just redirects
+    to the login page, collapsing what should have been N distinct
+    destinations into one indistinguishable "reached the login page"
+    flow. credentials alone can't fix this: filling and submitting a
+    login form is itself an ACTION this crawler only ever performs by
+    exploring to it, not something a bare direct-nav step does on its
+    own -- storage_state sidesteps the whole problem by starting every
+    context already logged in, root discovery included, so ordinary
+    DFS naturally reaches an authenticated app's real content and every
+    seed_urls entry lands on its actual destination instead of a login
+    redirect. Deliberately NOT "find whichever discovered candidate's
+    label contains the word 'login' and replay it before each seed" --
+    that's a guess about which candidate is the right one AND an
+    English-text-dependent heuristic, the same class of fragility this
+    project already rejected once for field_detect.py's own login-
+    trigger matching. Loading a bad storage_state (a stale/expired
+    session, a typo'd path) fails exactly like any other per-step
+    error -- a Checkpoint, this call returns None -- rather than
+    crashing the whole crawl or silently falling back to an
+    unauthenticated context with no signal that happened at all."""
+    storage_state = config.get("storage_state")
+    try:
+        context = browser.new_context(storage_state=storage_state) if storage_state else browser.new_context()
+    except Exception as exc:
+        run.checkpoints.append(Checkpoint(
+            kind="error", flow_id=None, state_fp=path[0].from_fp if path else None,
+            message="Could not create a browser context with the configured storage_state",
+            detail=str(exc)[:1200],
+        ))
+        return None
     page = context.new_page()
     last_fill_summary = None
     last_choice_state: dict = {}
@@ -218,7 +284,26 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
     # enough, and there was no way to raise it short of patching code.
     action_timeout_ms = config.get("limits", {}).get("action_timeout_ms", 8000)
     try:
-        page.goto(config["start_url"], wait_until="load")
+        try:
+            page.goto(config["start_url"], wait_until="load")
+        except Exception as exc:
+            # Found live, not assumed: this specific page.goto() -- unlike
+            # every step inside the loop below -- ran completely outside
+            # any try/except until now, so a transient failure here (a
+            # slow/flaky network, a public demo server briefly
+            # overloaded) crashed the whole crawl() call with an
+            # uncaught exception instead of degrading to a checkpoint,
+            # every other navigation failure in this codebase's own
+            # documented behavior. Every _run_path() call re-visits
+            # start_url first (see this function's own docstring), so
+            # this one line runs on every single replay, not just root
+            # discovery -- the exposure was universal, not an edge case.
+            run.checkpoints.append(Checkpoint(
+                kind="error", flow_id=None, state_fp=path[0].from_fp if path else None,
+                message="Could not load start_url for this replay",
+                detail=str(exc)[:1200],
+            ))
+            return None
         page.wait_for_timeout(200)
         for i, t in enumerate(path):
             el_meta = json.loads(t.replay_meta)
@@ -239,8 +324,23 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
                     detail=str(exc)[:1200],
                 ))
                 return None
-        (fp, url_pattern, title, candidates, unclassified, disabled, validation_signals,
-         captcha_signals) = _discover_state(page, config["allowed_domains"], run)
+        try:
+            (fp, url_pattern, title, candidates, unclassified, disabled, validation_signals,
+             captcha_signals) = _discover_state(page, config["allowed_domains"], run)
+        except Exception as exc:
+            # Same "was outside any try/except until now" gap as the
+            # initial page.goto() above, for the SAME reason: nothing
+            # here is tied to one specific Transition (this runs once
+            # per replay, after every step already succeeded), so a
+            # discovery-time failure (e.g. a CDP session dying mid-
+            # crawl) previously crashed the whole crawl uncaught instead
+            # of degrading to a checkpoint like everything else.
+            run.checkpoints.append(Checkpoint(
+                kind="error", flow_id=None, state_fp=path[-1].to_fp if path else None,
+                message="Could not discover the state reached after this replay",
+                detail=str(exc)[:1200],
+            ))
+            return None
         validation_errors = "; ".join(validation_signals)
         captcha_detected = "; ".join(captcha_signals)
         return (fp, url_pattern, title, candidates, last_fill_summary, unclassified, disabled,

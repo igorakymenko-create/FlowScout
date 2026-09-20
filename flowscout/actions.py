@@ -1396,6 +1396,43 @@ def fill_enclosing_form(page, el_meta: dict, credentials: dict) -> dict | None:
     return summary
 
 
+def _wait_for_render(page, timeout_ms: int = 5000):
+    """Bounded wait for in-flight network activity to quiet down --
+    catches a modern SPA's OWN async data-fetch-then-render cycle (an
+    authenticated app's dashboard/nav that only appears once a client-
+    side XHR/fetch resolves), which neither page.wait_for_load_state
+    ("load") (fires once the initial HTML/JS/CSS finishes loading --
+    well BEFORE the app's own JS has fetched and rendered anything) nor
+    _settle() below (CSS animations only, not an XHR-driven re-render
+    with no animation involved at all) accounts for. Found directly
+    from a live question, verified live: a real production SPA
+    (OrangeHRM, Vue-based, not a local fixture) showed 0 real
+    candidates 200ms after its own dashboard's `load` event fired --
+    the nav genuinely hadn't rendered yet -- and 34 after roughly 3
+    seconds.
+
+    Deliberately called ONLY when discovery already came back with
+    NOTHING at all (see crawler.py's _discover_state), not
+    unconditionally after every navigation/click -- tried that first
+    and reverted it after measuring the real cost: saucedemo.com's own
+    ordinary background traffic (analytics, unrelated to anything worth
+    crawling) alone takes ~2.7s to naturally go network-idle, so calling
+    this after every single action would have taxed EVERY crawl by
+    seconds per step for a problem specific to pages that render
+    late, not a general one. Confining it to "discovery found literally
+    nothing" means an ordinary, already-rendered page never pays this
+    cost at all, while a genuinely slow-rendering one gets exactly the
+    extra wait it needs. Bounded (not a hard requirement) for the same
+    reason every other grace period in this codebase is: a page with
+    continuous background activity (polling, a websocket) would never
+    go network-idle at all, and this has to degrade to "proceed
+    anyway, still nothing found", not hang the crawl."""
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout_ms)
+    except Exception:
+        pass
+
+
 def _settle(page, max_wait_ms: int = 1500):
     """Wait for in-flight CSS transitions/animations to finish (e.g. a
     slide-out menu closing) instead of a flat sleep. A fixed sleep either
