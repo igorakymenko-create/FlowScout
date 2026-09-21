@@ -34,7 +34,55 @@ from .fingerprint import normalize_url, state_fingerprint
 from .models import (
     Checkpoint, ElementCandidate, Flow, FlowStatus, Risk, RunResult, StateNode, Transition,
 )
+from .risk import _MUTATING_KEYWORDS
 from .semantic_dedup import DEFAULT_THRESHOLD, apply_semantic_dedup
+
+
+def _excursion_eligible(candidate: ElementCandidate) -> bool:
+    """Whether a candidate is worth trying while OFF allowed_domains
+    (see StateNode.external_domain) -- deliberately narrow, since
+    excursion mode exists specifically to avoid wandering into a third
+    party's own marketing/nav pages instead of completing the actual
+    integration (a payment, an OAuth/SSO login) and returning. Eligible
+    if either:
+    - it's inside a real <form> (`inForm` in the same el_meta
+      fill_enclosing_form already reads) -- checkout/login forms are
+      almost universally form-based, and
+    - its label matches the SAME _MUTATING_KEYWORDS list risk.py
+      already uses to recognize a progression-like action (pay,
+      confirm, continue, submit...) -- reused as-is rather than
+      inventing a second, parallel keyword list.
+    Anything else (a header logo, a footer link, "About us") is
+    withheld -- not DESTRUCTIVE (the domain itself was already approved
+    by risk.classify()), just out of scope for what this excursion is
+    for, recorded in skipped_candidates like any other withheld action."""
+    try:
+        el_meta = json.loads(candidate.selector)
+    except Exception:
+        el_meta = {}
+    # A plain <a> is NEVER eligible, via either check below -- found
+    # live, not assumed, on two separate false positives in the same
+    # fixture: (1) closestFormLike's own loose fallback (actions.py,
+    # "closest ancestor CONTAINING a real input/select/textarea", capped
+    # at 200 descendants) marked a sibling link on the same simple page
+    # as an unrelated <form> as inForm too, since both were direct
+    # children of <body> and <body> itself "contains" the form; (2) a
+    # link reading "Fake-Pay Home" matched the _MUTATING_KEYWORDS
+    # substring "pay" via the third party's own BRAND NAME, not an
+    # actual pay/submit action -- a real risk for any payment/identity
+    # provider whose name itself contains a keyword (PayPal, GPay,
+    # Razorpay...). A nav/footer/homepage link is virtually always an
+    # <a>; a real progression control (submit a payment, click
+    # "Continue"/"Authorize") is virtually always a button or input
+    # (native or ARIA), regardless of styling framework -- so this
+    # excludes every <a> outright rather than trying to patch either
+    # signal into being precise enough for THIS specific decision.
+    if el_meta.get("tag") == "a":
+        return False
+    if el_meta.get("inForm"):
+        return True
+    label = (candidate.label or "").lower()
+    return any(kw in label for kw in _MUTATING_KEYWORDS)
 
 
 def _local_tag(tag: str) -> str:
@@ -146,16 +194,33 @@ class _Frame:
     any_followed: bool = False
     any_risk_skipped: bool = False
     any_repeat_skipped: bool = False
+    any_excursion_capped: bool = False
+    # How many CONSECUTIVE steps this path has just taken outside
+    # allowed_domains (see StateNode.external_domain) -- 0 for an
+    # ordinary in-app frame, reset to 0 the moment a step lands back in
+    # allowed_domains. Capped against config["excursion_max_depth"] in
+    # _run_dfs's own main loop, independently of the ordinary max_depth
+    # budget: a real integration excursion (payment, OAuth/SSO) is
+    # typically 2-5 screens, not worth the same budget as the app itself.
+    excursion_depth: int = 0
 
 
 def _discover_state(page, allowed_domains, run: RunResult
-                     ) -> tuple[str, str, str, list[ElementCandidate], list[dict], list[dict], list[str], list[str]]:
+                     ) -> tuple[str, str, str, list[ElementCandidate], list[dict], list[dict], list[str], list[str], str]:
     url_pattern = normalize_url(page.url)
     title = page.title()
     domain = current_domain(page.url)
     exclude_patterns = run.config.get("exclude_patterns", [])
+    excursion_domains = run.config.get("excursion_domains", [])
+    # "" for an ordinary in-app state; the domain itself when this state
+    # was reached OUTSIDE allowed_domains -- only possible at all when
+    # that domain is also in excursion_domains (an unapproved external
+    # domain is DESTRUCTIVE in risk.classify() and never gets clicked in
+    # the first place, so discovery never runs against it). See
+    # StateNode.external_domain's own docstring for what this is used for.
+    external_domain = domain if domain not in allowed_domains else ""
     candidates, occluded, unclassified, disabled, validation_signals, captcha_signals = discover_candidates(
-        page, domain, allowed_domains, exclude_patterns)
+        page, domain, allowed_domains, exclude_patterns, excursion_domains)
     if not candidates and not occluded and not unclassified:
         # Found literally nothing at all -- could be a genuinely empty
         # page, or a modern SPA whose own async data-fetch-then-render
@@ -183,7 +248,7 @@ def _discover_state(page, allowed_domains, run: RunResult
         # cost, once.
         _wait_for_render(page)
         candidates, occluded, unclassified, disabled, validation_signals, captcha_signals = discover_candidates(
-            page, domain, allowed_domains, exclude_patterns)
+            page, domain, allowed_domains, exclude_patterns, excursion_domains)
     # validation_signals folded into the fingerprint itself (not just
     # reported afterward, like dialog_message/response_status are) --
     # see actions.py's discover_candidates docstring and Transition.
@@ -197,7 +262,7 @@ def _discover_state(page, allowed_domains, run: RunResult
         run.skipped_candidates.append({
             "state_fp": fp, "label": o["label"], "reason": o["reason"], "risk": "n/a",
         })
-    return fp, url_pattern, title, candidates, unclassified, disabled, validation_signals, captcha_signals
+    return fp, url_pattern, title, candidates, unclassified, disabled, validation_signals, captcha_signals, external_domain
 
 
 def _run_path(browser, config, path: list[Transition], run: RunResult, credentials: dict):
@@ -206,12 +271,14 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
     (fp, url_pattern, title, candidates, last_fill_summary, unclassified,
     disabled, last_choice_state, last_response_status,
     last_dialog_message, last_opened_new_page, validation_errors,
-    captcha_signals) for the state reached after the last step, or None
-    if some step failed (an error checkpoint is recorded, pointing at
-    which step). `validation_errors`/`captcha_signals` describe the
+    captcha_signals, external_domain) for the state reached after the
+    last step, or None if some step failed (an error checkpoint is
+    recorded, pointing at which step).
+    `validation_errors`/`captcha_signals`/`external_domain` describe the
     state reached after the LAST step (see _discover_state/
-    Transition.validation_errors/captcha_detected) -- unlike the other
-    `last_*` fields below, they describe the state itself, not the
+    Transition.validation_errors/captcha_detected/
+    StateNode.external_domain) -- unlike the other `last_*` fields
+    below, they describe the state itself, not the
     action that produced it, so they aren't specific to "the final step
     of `path`" in the same way; they're simply whatever _discover_state()
     found there. `last_fill_summary`
@@ -326,7 +393,7 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
                 return None
         try:
             (fp, url_pattern, title, candidates, unclassified, disabled, validation_signals,
-             captcha_signals) = _discover_state(page, config["allowed_domains"], run)
+             captcha_signals, external_domain) = _discover_state(page, config["allowed_domains"], run)
         except Exception as exc:
             # Same "was outside any try/except until now" gap as the
             # initial page.goto() above, for the SAME reason: nothing
@@ -345,13 +412,27 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
         captcha_detected = "; ".join(captcha_signals)
         return (fp, url_pattern, title, candidates, last_fill_summary, unclassified, disabled,
                 last_choice_state, last_response_status, last_dialog_message, last_opened_new_page,
-                validation_errors, captcha_detected)
+                validation_errors, captcha_detected, external_domain)
     finally:
         context.close()
 
 
-def _order_for(node: StateNode, max_breadth: int, run: RunResult, revisit_history: set[str]) -> list[int]:
-    """`revisit_history`: norm_signatures already confirmed, earlier in
+def _order_for(node: StateNode, max_breadth: int, run: RunResult, revisit_history: set[str],
+                excursion_max_breadth: int | None = None) -> list[int]:
+    """`excursion_max_breadth` (Sep 2026): when `node.external_domain`
+    is set (this state was reached on an operator-approved third-party
+    integration domain -- see StateNode.external_domain), candidates
+    are first narrowed to `_excursion_eligible()` ones (form-contained,
+    or matching the same progression-keyword list risk.py's own
+    MUTATING classification uses) before anything else runs, and
+    `max_breadth` itself is overridden by this, much smaller, cap --
+    defaulting effectively to 1 so the walk follows a SINGLE path
+    through the third party's flow instead of branching into their own
+    marketing/nav pages. An ordinary in-app state (`external_domain ==
+    ""`) is completely unaffected -- this parameter is only ever
+    consulted for the off-domain case.
+
+    `revisit_history`: norm_signatures already confirmed, earlier in
     THIS persona's own pass, to lead to a state already in run.states --
     see crawl()'s own comment at the revisit branch for how it's built.
     A stable sort moves known-revisit signatures to the back before
@@ -383,16 +464,30 @@ def _order_for(node: StateNode, max_breadth: int, run: RunResult, revisit_histor
     py, testcase_draft.py all already special-case it for the same
     reason -- this file just hadn't caught up yet)."""
     idxs = list(range(len(node.candidates)))
+    effective_breadth = max_breadth
+    if node.external_domain and excursion_max_breadth is not None:
+        eligible = [i for i in idxs if _excursion_eligible(node.candidates[i])]
+        for i in idxs:
+            if i not in eligible:
+                c = node.candidates[i]
+                run.skipped_candidates.append({
+                    "state_fp": node.fingerprint, "label": describe_action(json.loads(c.selector), None),
+                    "reason": f"outside excursion scope (not a form field/submit or a progression-"
+                              f"like action on {node.external_domain})",
+                    "risk": c.risk.value,
+                })
+        idxs = eligible
+        effective_breadth = excursion_max_breadth
     idxs.sort(key=lambda i: not node.candidates[i].is_choice and node.candidates[i].norm_signature in revisit_history)
-    if len(idxs) > max_breadth:
-        overflow = idxs[max_breadth:]
+    if len(idxs) > effective_breadth:
+        overflow = idxs[effective_breadth:]
         for i in overflow:
             c = node.candidates[i]
             run.skipped_candidates.append({
                 "state_fp": node.fingerprint, "label": describe_action(json.loads(c.selector), None),
                 "reason": "breadth limit exceeded", "risk": c.risk.value,
             })
-        idxs = idxs[:max_breadth]
+        idxs = idxs[:effective_breadth]
     return idxs
 
 
@@ -452,6 +547,15 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
         run.flows.append(flow)
         return flow
 
+    # Deliberately much smaller than the ordinary max_depth/max_breadth
+    # budgets above -- see risk.classify's own docstring and
+    # _order_for's excursion-mode filtering. A real integration
+    # (payment, OAuth/SSO) is typically 2-5 screens; walking it with the
+    # SAME budget as the app itself risks wandering into the third
+    # party's own marketing/nav pages instead of completing it.
+    excursion_max_depth = config.get("excursion_max_depth", 4)
+    excursion_max_breadth = config.get("excursion_max_breadth", 1)
+
     while stack:
         if len(run.flows) - flows_before >= max_flows:
             # Silent truncation, until Aug 2026: this used to just
@@ -481,7 +585,7 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
         frame = stack[-1]
         node = run.states[frame.fp]
 
-        if frame.pos >= len(frame.order) or len(frame.path) >= max_depth:
+        if frame.pos >= len(frame.order) or len(frame.path) >= max_depth or frame.excursion_depth >= excursion_max_depth:
             # Two genuinely different situations used to collapse into
             # one -- "ran out of things to try" (frame.pos exhausted,
             # a real dead end) and "there were more candidates, but
@@ -500,6 +604,13 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
             # precisely what was never even attempted, not just that
             # something was.
             depth_truncated = len(frame.path) >= max_depth and frame.pos < len(frame.order)
+            # Same distinction, for the SEPARATE excursion-depth budget
+            # (see StateNode.external_domain/_order_for's own docstring)
+            # -- checked only once depth_truncated already didn't fire,
+            # since a frame can't be truncated for two different reasons
+            # in the same visit.
+            excursion_capped = (not depth_truncated and frame.excursion_depth >= excursion_max_depth
+                                 and frame.pos < len(frame.order))
             if frame.path:
                 if depth_truncated:
                     remaining = frame.order[frame.pos:]
@@ -515,20 +626,38 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
                                            f"{len(remaining)} further action(s) available from here, "
                                            f"never tried",
                               resumable=True)
-                elif not frame.any_followed and (frame.any_risk_skipped or frame.any_repeat_skipped):
+                elif excursion_capped:
+                    remaining = frame.order[frame.pos:]
+                    for i in remaining:
+                        c = node.candidates[i]
+                        run.skipped_candidates.append({
+                            "state_fp": frame.fp,
+                            "label": describe_action(json.loads(c.selector), None),
+                            "reason": f"excursion depth limit reached (excursion_max_depth={excursion_max_depth})",
+                            "risk": c.risk.value,
+                        })
+                    emit_flow(frame.path, frame.fp, forced_status=FlowStatus.BLOCKED,
+                              extra_reason=f"Truncated: excursion depth limit reached "
+                                           f"({frame.excursion_depth} consecutive step(s) outside "
+                                           f"allowed_domains) with {len(remaining)} further action(s) "
+                                           f"available from here, never tried",
+                              resumable=True)
+                elif not frame.any_followed and (frame.any_risk_skipped or frame.any_repeat_skipped
+                                                  or frame.any_excursion_capped):
                     # Same "name what actually happened" discipline as
                     # depth/max_flows truncation above -- a dead end
                     # reached only because policy withheld every
                     # remaining action reads identically to a genuine
                     # dead end unless the reason is spelled out, and
-                    # the two withholding reasons (risk gating vs. the
-                    # repeat-action cap) are independent enough that a
-                    # frame can hit either, or both, at once.
+                    # the withholding reasons are independent enough
+                    # that a frame can hit more than one at once.
                     withheld_by = []
                     if frame.any_risk_skipped:
                         withheld_by.append("risk policy (destructive, or mutating with allow_mutating=false)")
                     if frame.any_repeat_skipped:
                         withheld_by.append(f"the action-repeat cap (max_action_repeat={max_action_repeat})")
+                    if frame.any_excursion_capped:
+                        withheld_by.append("excursion scope (see Safety register for which domain/candidates)")
                     emit_flow(frame.path, frame.fp, forced_status=FlowStatus.BLOCKED,
                               extra_reason="Dead end: remaining actions were withheld by "
                                            + " and ".join(withheld_by),
@@ -615,7 +744,7 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
 
         (new_fp, url_pat, title, new_candidates, fill_summary, new_unclassified, new_disabled,
          choice_state, response_status, dialog_message, opened_new_page, validation_errors,
-         captcha_detected) = result
+         captcha_detected, external_domain) = result
         # choice_state (radio/checkbox selections observed at submit time) is
         # merged into the label for human/gap-analysis visibility only -- it
         # must never reach trial.form_fields, since M4's codegen turns that
@@ -680,7 +809,7 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
                 fingerprint=new_fp, url_pattern=url_pat, raw_url="", title=title,
                 candidates=new_candidates, discovered_by_flow=next_flow_id[0],
                 unclassified_interactive=new_unclassified, disabled_interactive=new_disabled,
-                captcha_detected=captcha_detected,
+                captcha_detected=captcha_detected, external_domain=external_domain,
             )
             emit_flow(new_path, end_fp=new_fp, forced_status=FlowStatus.BLOCKED,
                       extra_reason=f"Blocked by a CAPTCHA/challenge page ({captcha_detected}) "
@@ -700,10 +829,23 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
                               title=title, candidates=new_candidates,
                               discovered_by_flow=next_flow_id[0],
                               unclassified_interactive=new_unclassified,
-                              disabled_interactive=new_disabled)
+                              disabled_interactive=new_disabled,
+                              external_domain=external_domain)
         run.states[new_fp] = new_node
         child = _Frame(fp=new_fp, path=new_path)
-        child.order = _order_for(new_node, max_breadth, run, revisit_history)
+        # Consecutive, not cumulative -- resets to 0 the moment a step
+        # lands back in allowed_domains, so returning from a completed
+        # integration resumes ordinary exploration with the ordinary
+        # budget, exactly as if the excursion never happened.
+        child.excursion_depth = frame.excursion_depth + 1 if external_domain else 0
+        child.order = _order_for(new_node, max_breadth, run, revisit_history, excursion_max_breadth)
+        # _order_for already recorded WHY each ineligible candidate was
+        # withheld in skipped_candidates; this only flags it on the
+        # frame itself so the dead-end message below (if every
+        # candidate got filtered out) names excursion scope instead of
+        # falling through to a generic "New normalized action sequence".
+        if external_domain and new_candidates and not child.order:
+            child.any_excursion_capped = True
         stack.append(child)
 
 
@@ -728,6 +870,13 @@ def crawl(config: dict) -> RunResult:
     max_action_repeat = limits.get("max_action_repeat", 2)
     allow_mutating = config.get("allow_mutating", True)
     allowed_domains = config.get("allowed_domains", [])
+    # Same default as _run_dfs's own read of this -- root/seed states are
+    # never actually off-domain by construction (start_url and every
+    # resolved seed_urls entry are already checked against
+    # allowed_domains elsewhere), so this is a no-op safety net here,
+    # not something expected to fire; kept for consistency rather than
+    # assuming that invariant holds forever.
+    excursion_max_breadth = config.get("excursion_max_breadth", 1)
 
     # Multiple personas (named credential sets) walk the same config
     # sequentially into ONE RunResult -- one report, one change-report,
@@ -806,12 +955,12 @@ def crawl(config: dict) -> RunResult:
                     browser.close()
                     return run
                 (root_fp, root_url_pat, root_title, root_candidates, _, root_unclassified,
-                 root_disabled, _, _, _, _, _, root_captcha) = root
+                 root_disabled, _, _, _, _, _, root_captcha, root_external_domain) = root
                 run.states[root_fp] = StateNode(
                     fingerprint=root_fp, url_pattern=root_url_pat, raw_url=config["start_url"],
                     title=root_title, candidates=root_candidates,
                     unclassified_interactive=root_unclassified, disabled_interactive=root_disabled,
-                    captcha_detected=root_captcha,
+                    captcha_detected=root_captcha, external_domain=root_external_domain,
                 )
                 if root_captcha:
                     # start_url itself is behind a CAPTCHA/challenge --
@@ -836,7 +985,7 @@ def crawl(config: dict) -> RunResult:
 
             root_node = run.states[root_fp]
             root_frame = _Frame(fp=root_fp)
-            root_frame.order = _order_for(root_node, max_breadth, run, revisit_history)
+            root_frame.order = _order_for(root_node, max_breadth, run, revisit_history, excursion_max_breadth)
             stack: list[_Frame] = [root_frame]
 
             # One additional root-like frame per seed URL -- each starts
@@ -868,7 +1017,7 @@ def crawl(config: dict) -> RunResult:
                         continue
                     (seed_fp, seed_url_pat, seed_title, seed_candidates, _, seed_unclassified,
                      seed_disabled, _, seed_status, seed_dialog, seed_new_page, seed_validation,
-                     seed_captcha) = seed_result
+                     seed_captcha, seed_external_domain) = seed_result
                     seed_trial.response_status = seed_status
                     seed_trial.dialog_message = seed_dialog
                     seed_trial.opened_new_page = seed_new_page
@@ -878,7 +1027,7 @@ def crawl(config: dict) -> RunResult:
                             fingerprint=seed_fp, url_pattern=seed_url_pat, raw_url=seed_url,
                             title=seed_title, candidates=seed_candidates,
                             unclassified_interactive=seed_unclassified, disabled_interactive=seed_disabled,
-                            captcha_detected=seed_captcha,
+                            captcha_detected=seed_captcha, external_domain=seed_external_domain,
                         )
                     # Cached as (fp, captcha) together, not just fp --
                     # otherwise a LATER persona reusing this seed_url
@@ -911,7 +1060,7 @@ def crawl(config: dict) -> RunResult:
                     continue
                 seed_node = run.states[seed_fp]
                 seed_frame = _Frame(fp=seed_fp, path=[seed_trial])
-                seed_frame.order = _order_for(seed_node, max_breadth, run, revisit_history)
+                seed_frame.order = _order_for(seed_node, max_breadth, run, revisit_history, excursion_max_breadth)
                 stack.append(seed_frame)
 
             states_before = len(run.states)
@@ -989,6 +1138,7 @@ def resume_flow(run: RunResult, flow: Flow, limit_overrides: dict, credentials: 
     max_flows = limits["max_flows"]
     max_action_repeat = limits.get("max_action_repeat", 2)
     allow_mutating = limit_overrides.get("allow_mutating", run.config.get("allow_mutating", True))
+    excursion_max_breadth = run.config.get("excursion_max_breadth", 1)
 
     # Local only -- run.config stays an honest record of how the
     # original crawl was actually configured; a resume's own
@@ -1005,7 +1155,20 @@ def resume_flow(run: RunResult, flow: Flow, limit_overrides: dict, credentials: 
         browser = pw.chromium.launch(headless=True)
         try:
             frame = _Frame(fp=flow.end_state_fp, path=list(flow.transitions))
-            frame.order = _order_for(node, max_breadth, run, revisit_history)
+            # Reconstructed, not assumed 0: the flow being resumed may
+            # already have ended mid-excursion (truncated by the
+            # ordinary max_depth, not excursion_max_depth, before this
+            # feature existed to tell the two apart) -- counted from the
+            # trailing run of off-domain states its own transitions
+            # actually reached, using each StateNode's own recorded
+            # external_domain rather than re-deriving it from scratch.
+            for t in reversed(flow.transitions):
+                st = run.states.get(t.to_fp)
+                if st and st.external_domain:
+                    frame.excursion_depth += 1
+                else:
+                    break
+            frame.order = _order_for(node, max_breadth, run, revisit_history, excursion_max_breadth)
             stack: list[_Frame] = [frame]
 
             states_before = len(run.states)
@@ -1138,6 +1301,7 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
     max_flows = limits["max_flows"]
     max_action_repeat = limits.get("max_action_repeat", 2)
     allow_mutating = limit_overrides.get("allow_mutating", run.config.get("allow_mutating", True))
+    excursion_max_breadth = run.config.get("excursion_max_breadth", 1)
 
     # Local only -- run.config stays an honest record of how the
     # original crawl was actually configured, same reasoning as
@@ -1183,7 +1347,7 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
                                     "for which step and why")
             (new_fp, url_pat, title, new_candidates, fill_summary, new_unclassified, new_disabled,
              choice_state, response_status, dialog_message, opened_new_page, validation_errors,
-             captcha_detected) = result
+             captcha_detected, external_domain) = result
 
             last = combo_path[-1]
             label_fields = {**(fill_summary or {}), **(choice_state or {})}
@@ -1225,7 +1389,7 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
                         fingerprint=new_fp, url_pattern=url_pat, raw_url="", title=title,
                         candidates=new_candidates, discovered_by_flow=next_flow_id[0],
                         unclassified_interactive=new_unclassified, disabled_interactive=new_disabled,
-                        captcha_detected=captcha_detected,
+                        captcha_detected=captcha_detected, external_domain=external_domain,
                     )
                 flow = Flow(
                     id=next_flow_id[0], status=FlowStatus.BLOCKED, duplicate_of=None,
@@ -1242,6 +1406,7 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
                     fingerprint=new_fp, url_pattern=url_pat, raw_url="", title=title,
                     candidates=new_candidates, discovered_by_flow=next_flow_id[0],
                     unclassified_interactive=new_unclassified, disabled_interactive=new_disabled,
+                    external_domain=external_domain,
                 )
                 run.states[new_fp] = new_node
                 flow = Flow(
@@ -1258,7 +1423,16 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
                 # WHATEVER ELSE this unlocked -- same "own full budget"
                 # reasoning as resume_flow()'s states_before/flows_before.
                 frame = _Frame(fp=new_fp, path=combo_path)
-                frame.order = _order_for(new_node, max_breadth, run, revisit_history)
+                # Same reconstruction as resume_flow()'s own -- combo_path
+                # already includes path_to_state, which could itself end
+                # mid-excursion.
+                for t in reversed(combo_path):
+                    st = run.states.get(t.to_fp)
+                    if st and st.external_domain:
+                        frame.excursion_depth += 1
+                    else:
+                        break
+                frame.order = _order_for(new_node, max_breadth, run, revisit_history, excursion_max_breadth)
                 stack: list[_Frame] = [frame]
                 states_before = len(run.states) - 1
                 flows_before = len(run.flows) - 1

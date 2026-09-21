@@ -113,6 +113,17 @@ def _flow_steps_html(flow, states: dict) -> str:
                 f' <span class="step-note step-error">→ CAPTCHA/challenge detected: '
                 f'{_esc(t.captcha_detected)}</span>'
             )
+        # external_domain (Sep 2026): the state THIS step landed on is an
+        # operator-approved excursion (config["excursion_domains"]), not
+        # the app itself -- a plain note (not step-error), since leaving
+        # to complete a real integration is expected, correct behavior,
+        # not a problem. See StateNode.external_domain's own docstring.
+        to_state = states.get(t.to_fp)
+        if to_state and to_state.external_domain:
+            outcome_note += (
+                f' <span class="step-note">→ left the app for {_esc(to_state.external_domain)} '
+                f'(approved excursion)</span>'
+            )
         parts.append(
             f'<li class="step"><span class="step-idx">{i + 1}</span>'
             f'<span class="step-page">{page}</span>'
@@ -164,6 +175,15 @@ def _flow_card_html(flow, states: dict, show_persona: bool = False,
     # versus which were there before.
     origin_html = (f'<span class="risk-chip risk-safe" title="{_esc(flow.origin_note)}">'
                    f'↳ {_esc(flow.origin_note)}</span>' if flow.origin_note else "")
+    # external_domain (Sep 2026): this flow ended on an operator-approved
+    # excursion domain (a payment gateway, an OAuth/SSO provider -- see
+    # StateNode.external_domain / config["excursion_domains"]), not the
+    # app itself -- flagged directly on the card so it reads as "left
+    # the app" at a glance, not just from the raw end_url.
+    excursion_html = (f'<span class="risk-chip risk-mutating" '
+                       f'title="Reached on an approved excursion domain, not the app itself">'
+                       f'↗ {_esc(end_state.external_domain)}</span>'
+                       if end_state and end_state.external_domain else "")
     return f"""
         <article class="flow-card">
           <header class="flow-head">
@@ -171,6 +191,7 @@ def _flow_card_html(flow, states: dict, show_persona: bool = False,
             <span class="pill {status_class}">{status_label}</span>
             {persona_html}
             {origin_html}
+            {excursion_html}
             <span class="flow-end mono">{end_url}</span>
             <span class="flow-len">{len(flow.transitions)} step{'s' if len(flow.transitions) != 1 else ''}</span>
           </header>

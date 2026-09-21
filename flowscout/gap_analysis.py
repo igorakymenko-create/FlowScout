@@ -405,18 +405,35 @@ def analyze_gaps(run: RunResult, tcms_items: list[TcmsItem], tcms_source: str,
     provider = run.config.get("embeddings_provider")
     unique_flows = [f for f in run.flows if f.status == FlowStatus.UNIQUE]
 
+    flow_coverage: dict[int, FlowCoverage] = {}
+    # Excluded from matching entirely, not just left unscored -- see
+    # FlowCoverage.status's own docstring for why. Checked before
+    # anything else runs, so an excursion flow never competes for (or
+    # steals) a TCMS pairing a genuinely in-app flow might have matched.
+    external_flows = [f for f in unique_flows
+                       if (st := run.states.get(f.end_state_fp)) is not None and st.external_domain]
+    if external_flows:
+        unique_flows = [f for f in unique_flows if f not in external_flows]
+        for f in external_flows:
+            st = run.states[f.end_state_fp]
+            flow_coverage[f.id] = FlowCoverage(
+                flow_id=f.id, status="external", matched_tcms_id=None, matched_tcms_title=None, score=0.0,
+            )
+
+    external_note = f", {len(external_flows)} on an approved excursion domain (excluded)" if external_flows else ""
     if not unique_flows:
         return GapAnalysis(tcms_source=tcms_source, threshold=threshold,
-                            status="skipped: no unique flows to compare")
+                            status=f"skipped: no unique in-app flows to compare{external_note}",
+                            flow_coverage=list(flow_coverage.values()))
     if not tcms_items:
         return GapAnalysis(tcms_source=tcms_source, threshold=threshold,
-                            status="skipped: TCMS file had no usable rows")
+                            status="skipped: TCMS file had no usable rows",
+                            flow_coverage=list(flow_coverage.values()))
 
     tcms_by_id = {t.id: t for t in tcms_items}
     identities = {f.id: flow_identity(f, run.states) for f in unique_flows}
     mutations = {f.id: sorted(mutating_signature_set(f)) for f in unique_flows}
 
-    flow_coverage: dict[int, FlowCoverage] = {}
     tcms_coverage: dict[str, TcmsCoverage] = {}
 
     # Tier 0: operator-confirmed pairings from a previous run. Free (no
@@ -560,7 +577,7 @@ def analyze_gaps(run: RunResult, tcms_items: list[TcmsItem], tcms_source: str,
         )
 
     # Restore original order (dict insertion put confirmed pairs first).
-    flow_coverage_list = [flow_coverage[f.id] for f in unique_flows]
+    flow_coverage_list = [flow_coverage[f.id] for f in unique_flows] + [flow_coverage[f.id] for f in external_flows]
     tcms_coverage_list = [tcms_coverage[t.id] for t in tcms_items]
 
     # Reverse direction (Aug 2026): for every TCMS item the crawl found
@@ -582,6 +599,8 @@ def analyze_gaps(run: RunResult, tcms_items: list[TcmsItem], tcms_source: str,
     status = f"ran: {len(unique_flows)} flows vs {len(tcms_items)} TCMS items"
     if confirmed_n:
         status += f", {confirmed_n} already confirmed"
+    if external_flows:
+        status += f", {len(external_flows)} on an approved excursion domain (excluded)"
     if fuzzy_note:
         status += f"; {fuzzy_note}"
     status += f" — {gaps} flow(s) undocumented, {partial} partially covered, {not_found} test(s) not found in the app"

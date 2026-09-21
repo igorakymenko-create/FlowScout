@@ -113,6 +113,18 @@ class StateNode:
     # reason -- not just the one that discovered it. Checked by
     # crawler.py on every revisit, not only on first discovery.
     captcha_detected: str = ""
+    # "" for an ordinary state (its own domain is in allowed_domains),
+    # else the domain this state was actually reached on -- a third-
+    # party integration (payment, OAuth/SSO) explicitly approved via
+    # config["excursion_domains"] (see risk.classify). Set once, at
+    # discovery, from the same normalize_url()/current_domain() logic
+    # already used everywhere else -- never guessed from the label or
+    # candidate content. Lets the report mark exactly which steps
+    # happened on a third party's own site, not this app, and lets
+    # gap_analysis.py exclude them from TCMS matching (a customer's own
+    # test case describing "the checkout page" should never accidentally
+    # match Stripe's own hosted UI text).
+    external_domain: str = ""
 
 
 @dataclass
@@ -319,6 +331,7 @@ class RunResult:
                 unclassified_interactive=s.get("unclassified_interactive", []),
                 disabled_interactive=s.get("disabled_interactive", []),
                 captcha_detected=s.get("captcha_detected", ""),
+                external_domain=s.get("external_domain", ""),
             )
         for f in d.get("flows", []):
             transitions = [
@@ -375,9 +388,17 @@ class FlowCoverage:
     "partial" when some did and some didn't (see action_matches for
     exactly which), "gap" when none did, "navigation" for flows with no
     mutating actions at all (pure browsing -- not compared, same
-    shared-step/precondition signal M4's codegen already uses)."""
+    shared-step/precondition signal M4's codegen already uses),
+    "external" for a flow whose end state was reached on an operator-
+    approved excursion domain (see StateNode.external_domain) --
+    deliberately excluded from ordinary matching, not just left
+    unscored: a TCMS item describing "the app's own checkout page"
+    should never accidentally match a third party's own hosted UI text,
+    and never counted toward tcms_not_found either, since the app-side
+    TCMS item this flow might otherwise have satisfied was never really
+    tested against the app's own behavior at all."""
     flow_id: int
-    status: str  # "covered" | "partial" | "gap" | "navigation"
+    status: str  # "covered" | "partial" | "gap" | "navigation" | "external"
     # Quick-glance single match: the highest-scoring entry in
     # action_matches below. For the common single-action flow this IS
     # the whole story; for a multi-action flow, check action_matches for
@@ -447,6 +468,7 @@ class GapAnalysis:
             "flows_partial": sum(1 for x in self.flow_coverage if x.status == "partial"),
             "flows_gap": sum(1 for x in self.flow_coverage if x.status == "gap"),
             "flows_navigation": sum(1 for x in self.flow_coverage if x.status == "navigation"),
+            "flows_external": sum(1 for x in self.flow_coverage if x.status == "external"),
             "flows_confirmed": sum(1 for x in self.flow_coverage if x.confirmed),
             "tcms_covered": sum(1 for x in self.tcms_coverage if x.status == "covered"),
             "tcms_not_found": sum(1 for x in self.tcms_coverage if x.status == "not_found"),

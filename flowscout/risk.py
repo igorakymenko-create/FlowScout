@@ -38,9 +38,39 @@ _MUTATING_KEYWORDS = [
 ]
 
 
+def _domain_matches_excursion(domain: str, patterns: list[str]) -> bool:
+    """Wildcard-aware match against an operator-approved excursion
+    allowlist (e.g. "*.stripe.com" matching "checkout.stripe.com") --
+    the same fnmatch mechanism exclude_patterns already uses elsewhere
+    in this module, just applied to a domain instead of a URL path."""
+    return any(fnmatch(domain, pattern) for pattern in patterns)
+
+
 def classify(label: str, href: str | None, current_domain: str,
-             allowed_domains: list[str], exclude_patterns: list[str] | None = None) -> tuple[Risk, str]:
+             allowed_domains: list[str], exclude_patterns: list[str] | None = None,
+             excursion_domains: list[str] | None = None) -> tuple[Risk, str]:
+    """`excursion_domains` (Sep 2026): an explicit, operator-named
+    allowlist for third-party integrations worth actually walking
+    through -- a payment processor, an OAuth/SSO provider -- as
+    opposed to an ordinary external link, which stays DESTRUCTIVE
+    unconditionally. Deliberately a SEPARATE allowlist from
+    `allowed_domains`, not a relaxation of it: `allowed_domains` means
+    "this is part of the app, explore it normally, with the ordinary
+    depth/breadth budget"; a domain only in `excursion_domains` gets
+    the much narrower excursion budget crawler.py's own DFS loop
+    enforces (a small, separate depth cap, breadth capped to ~1 so the
+    walk doesn't branch into the third party's own marketing pages,
+    and only form-contained or progression-labeled candidates even
+    tried at all -- see _order_for's own excursion-mode filtering).
+    Never falls through to SAFE: leaving to a third party is never a
+    harmless action even when its own label doesn't say so, so an
+    excursion match floors at MUTATING (withheld exactly like
+    "checkout"/"pay" already are unless allow_mutating=true) --
+    matched below, not returned immediately here, since a genuinely
+    destructive-looking label on the excursion domain itself (a
+    logout-like keyword, an exclude_pattern) must still win."""
     text = (label or "").strip().lower()
+    excursion_match = ""
 
     if href:
         try:
@@ -50,7 +80,10 @@ def classify(label: str, href: str | None, current_domain: str,
             parts = None
             target_domain = ""
         if target_domain and target_domain not in allowed_domains and target_domain != current_domain:
-            return Risk.DESTRUCTIVE, f"external navigation to {target_domain}"
+            if excursion_domains and _domain_matches_excursion(target_domain, excursion_domains):
+                excursion_match = target_domain
+            else:
+                return Risk.DESTRUCTIVE, f"external navigation to {target_domain}"
         # Operator-specified no-go pages (legal/privacy/social, anything
         # not worth the crawl budget or not safe to touch) -- same
         # treatment as an external domain: never followed, regardless of
@@ -88,6 +121,11 @@ def classify(label: str, href: str | None, current_domain: str,
 
     for kw in _MUTATING_KEYWORDS:
         if kw in text:
-            return Risk.MUTATING, f"matches mutating keyword '{kw}'"
+            reason = f"matches mutating keyword '{kw}'"
+            if excursion_match:
+                reason += f" (approved external excursion to {excursion_match})"
+            return Risk.MUTATING, reason
 
+    if excursion_match:
+        return Risk.MUTATING, f"approved external excursion to {excursion_match}"
     return Risk.SAFE, ""

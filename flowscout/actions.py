@@ -886,12 +886,14 @@ def _detect_choice_groups(page, indices: list[int]) -> set[int]:
 
 def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: list[str],
                       exclude_patterns: list[str] | None, seen: set,
-                      is_choice: bool = False) -> tuple[ElementCandidate | None, dict | None]:
+                      is_choice: bool = False, excursion_domains: list[str] | None = None
+                      ) -> tuple[ElementCandidate | None, dict | None]:
     """Returns (candidate, occlusion_dict) -- exactly one is non-None,
     or both are None for a duplicate signature already seen. `is_choice`
     is only meaningful for the non-select branch below -- a select
     option is always is_choice=True by construction (see
-    identity.py's mutating_signature_set)."""
+    identity.py's mutating_signature_set). `excursion_domains` is
+    passed straight through to classify() -- see its own docstring."""
     if el.get("tag") == "select":
         # A <select>'s own dataTest/id names the CONTROL, shared by every
         # one of its options -- the generic signature scheme below would
@@ -914,7 +916,7 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
         # "select-choice-" prefix, which still starts with "select-" and
         # collapsed both anyway. "choice-" isn't one of the known prefixes.
         norm_signature = normalize_signature(f"choice-{base}-{el['selectValue']}")
-        risk, reason = classify(label, None, current_domain, allowed_domains, exclude_patterns)
+        risk, reason = classify(label, None, current_domain, allowed_domains, exclude_patterns, excursion_domains)
         return ElementCandidate(
             signature=signature, norm_signature=norm_signature, label=label,
             selector=json.dumps(el), risk=risk, risk_reason=reason, discovered_via=via,
@@ -937,7 +939,7 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
         # reusing the one already proven safe rather than trusting a new
         # one without the same live check.
         norm_signature = normalize_signature(f"choice-{base}-{el['radioValue']}")
-        risk, reason = classify(label, None, current_domain, allowed_domains, exclude_patterns)
+        risk, reason = classify(label, None, current_domain, allowed_domains, exclude_patterns, excursion_domains)
         return ElementCandidate(
             signature=signature, norm_signature=norm_signature, label=label,
             selector=json.dumps(el), risk=risk, risk_reason=reason, discovered_via=via,
@@ -958,7 +960,7 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
         seen.add(signature)
         label = el["text"] or el["checkboxName"] or "checkbox"
         norm_signature = normalize_signature(f"choice-{base}-{el['checkboxValue']}")
-        risk, reason = classify(label, None, current_domain, allowed_domains, exclude_patterns)
+        risk, reason = classify(label, None, current_domain, allowed_domains, exclude_patterns, excursion_domains)
         return ElementCandidate(
             signature=signature, norm_signature=norm_signature, label=label,
             selector=json.dumps(el), risk=risk, risk_reason=reason, discovered_via=via,
@@ -990,7 +992,7 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
         seen.add(signature)
         label = el["roleAccessibleName"] or el["dataTest"] or el["id"] or "checkbox"
         norm_signature = normalize_signature(f"choice-{base}-{el['roleChecked']}")
-        risk, reason = classify(label, None, current_domain, allowed_domains, exclude_patterns)
+        risk, reason = classify(label, None, current_domain, allowed_domains, exclude_patterns, excursion_domains)
         return ElementCandidate(
             signature=signature, norm_signature=norm_signature, label=label,
             selector=json.dumps(el), risk=risk, risk_reason=reason, discovered_via=via,
@@ -1019,7 +1021,7 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
         seen.add(signature)
         label = name or el["dataTest"] or el["id"] or "option"
         norm_signature = normalize_signature(f"choice-{base}-{value_key}")
-        risk, reason = classify(label, None, current_domain, allowed_domains, exclude_patterns)
+        risk, reason = classify(label, None, current_domain, allowed_domains, exclude_patterns, excursion_domains)
         return ElementCandidate(
             signature=signature, norm_signature=norm_signature, label=label,
             selector=json.dumps(el), risk=risk, risk_reason=reason, discovered_via=via,
@@ -1057,7 +1059,7 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
                       "-- skipped rather than risk clicking the wrong element",
         }
     norm_signature = normalize_signature(el["dataTest"] or el["id"] or el["text"] or el["tag"])
-    risk, reason = classify(label, el["href"] or None, current_domain, allowed_domains, exclude_patterns)
+    risk, reason = classify(label, el["href"] or None, current_domain, allowed_domains, exclude_patterns, excursion_domains)
     return ElementCandidate(
         signature=signature, norm_signature=norm_signature, label=label,
         selector=json.dumps(el), risk=risk, risk_reason=reason, discovered_via=via,
@@ -1066,10 +1068,12 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
 
 
 def discover_candidates(page, current_domain: str, allowed_domains: list[str],
-                         exclude_patterns: list[str] | None = None
+                         exclude_patterns: list[str] | None = None,
+                         excursion_domains: list[str] | None = None
                          ) -> tuple[list[ElementCandidate], list[dict], list[dict], list[dict], list[str], list[str]]:
     """Returns (candidates, occluded, unclassified, disabled, validation_signals,
-    captcha_signals).
+    captcha_signals). `excursion_domains` is passed straight through to
+    every classify() call -- see its own docstring for what it does.
 
     occluded: on-screen and otherwise valid candidates currently covered
     by something else (an open menu panel, a modal) per the browser's own
@@ -1182,7 +1186,7 @@ def discover_candidates(page, current_domain: str, allowed_domains: list[str],
     seen: set = set()
     for el, via, is_choice in formal + promoted:
         cand, occ = _build_candidate(el, via, current_domain, allowed_domains, exclude_patterns, seen,
-                                      is_choice=is_choice)
+                                      is_choice=is_choice, excursion_domains=excursion_domains)
         if cand is not None:
             candidates.append(cand)
         elif occ is not None:

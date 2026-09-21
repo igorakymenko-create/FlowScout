@@ -80,6 +80,14 @@ verify quickly — it doesn't replace knowing what to point it at.
   storage-state file from a manual login, or the state inline) — every
   context, including seed URLs, begins logged in, so auth-walled pages
   never redirect to a login screen instead of the real content.
+- **Walks a bounded excursion into an approved third-party integration**
+  (a payment gateway, an OAuth/SSO provider) via `"excursion_domains"` —
+  ordinary external links stay destructive and are never followed, but
+  a named domain gets a narrow, separate budget (breadth capped to 1,
+  depth capped independently of the app's own limits) that follows the
+  real integration through to completion instead of wandering into the
+  third party's own marketing pages, then resumes ordinary exploration
+  the moment it returns.
 - A **local operator UI** (FastAPI + vanilla JS, no build step) to
   configure and run crawls, attach a TCMS export, and browse reports —
   or drive all of this from the CLI / a CI job instead.

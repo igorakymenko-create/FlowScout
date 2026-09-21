@@ -4736,3 +4736,114 @@ none of these are fixable by handing the crawler more permissions:
 
 All 20 existing tests still pass; test project state cleaned up; no
 leftover Playwright/headless-Chromium processes.
+
+## Bounded excursions into approved third-party integrations (done, Sep 2026)
+
+The first of the four remaining items from the entry above, picked as
+the most tractable. A payment gateway (Stripe Checkout, PayPal), an
+OAuth/SSO provider, a subscription/billing portal -- any real
+integration that leaves the app's own domain and (usually) comes back
+-- was previously indistinguishable from an ordinary external link:
+`risk.classify()` marks any off-`allowed_domains` navigation
+DESTRUCTIVE, unconditionally, so the crawler never even tries it.
+
+**The operator's own design concern, addressed directly, not
+papered over with "just allow N steps":** a flat step budget alone
+isn't enough -- a hosted payment/billing page typically has its OWN
+marketing nav (a homepage link, "Pricing", "About us"), and an
+unconstrained DFS given a few steps of rope would spend them wandering
+into the third party's own site instead of completing the actual
+integration. Two mechanisms, not one:
+- A completely separate, explicit allowlist --
+  `config["excursion_domains"]` (wildcard-aware, e.g. `"*.stripe.com"`)
+  -- distinct from `allowed_domains`: the latter means "this is the
+  app, explore it normally"; the former means "this specific
+  third party is worth walking through, with a much narrower budget."
+  An ordinary external link (a random domain, a social-share button)
+  is unaffected -- still unconditionally DESTRUCTIVE exactly as before.
+- Once actually on an excursion domain, candidates are narrowed to
+  `_excursion_eligible()` ones before anything else runs: a real
+  progression control (a form's own button/input, or one matching the
+  SAME `_MUTATING_KEYWORDS` list risk.py's own classification already
+  uses) -- never a plain `<a>` link, which is precisely the "wander to
+  another page" affordance this exists to avoid. Breadth is separately
+  capped at `excursion_max_breadth` (default 1: follow ONE path
+  through, don't branch), and depth at `excursion_max_depth` (default
+  4, independent of the app's own `max_depth` -- a real integration is
+  typically 2-5 screens, not worth the same budget as the app itself).
+  Both caps reset to zero the moment a step lands back in
+  `allowed_domains`, so returning from a completed integration resumes
+  ordinary exploration with the ordinary budget.
+
+**Two real false positives found live while building the fixture to
+prove eligibility filtering actually works, neither assumed:**
+1. `closestFormLike()`'s own loose fallback (used for `inForm`) walks
+   up to the closest ancestor containing ANY real input/select/
+   textarea, capped at 200 descendants -- on a simple fixture page, a
+   sibling link and an unrelated `<form>` were both direct children of
+   `<body>`, and `<body>` "contains" the form, so the link registered
+   as `inForm` too even though it had nothing to do with it. Fixed by
+   requiring the candidate's OWN tag to be `button`/`input` before the
+   `inForm` fast path applies at all -- never a bare `<a>`.
+2. A link reading "Fake-Pay Home" matched `_MUTATING_KEYWORDS`'s
+   substring `"pay"` via the third party's own BRAND NAME, not an
+   actual pay/submit action -- a real, generalizable risk for any
+   payment/identity provider whose own name contains a keyword
+   (PayPal, GPay, Razorpay...). Fixed the same way as (1): a plain
+   `<a>` is now never eligible via either check, keyword match
+   included, closing both false positives with one rule rather than
+   trying to patch each signal into being precise enough on its own.
+
+**Classification (`risk.py`):** an excursion-domain match doesn't
+return early as DESTRUCTIVE, but falls through to the SAME keyword
+checks an ordinary same-domain candidate goes through (so a genuinely
+destructive-looking label on the excursion domain itself -- a
+logout-like keyword, an `exclude_patterns` match -- still wins), and
+floors at MUTATING if nothing else matched: leaving to a third party
+is never treated as harmless just because its own label doesn't say
+so, withheld exactly like `checkout`/`pay` already are unless
+`allow_mutating=true`.
+
+**`StateNode.external_domain`** (empty for an ordinary in-app state,
+the domain itself when reached outside `allowed_domains`) flows
+through to two more places: the report (a badge on the flow card, plus
+a per-step "left the app for X (approved excursion)" note -- a plain
+note, not an error, since this is expected, correct behavior) and
+`gap_analysis.py`, where a flow ending externally is excluded from
+TCMS matching entirely (a new `FlowCoverage` status, `"external"`,
+counted in the summary) rather than left to potentially match a test
+case describing the app's OWN checkout page against the third party's
+own hosted UI text.
+
+**Verified live, through the full real `crawl()` pipeline, three
+separate fixtures:**
+
+```
+1) Payment round trip (app 8971 -> fake gateway 8972 -> back):
+   flow: 'Open "Cart"', 'Open "Checkout"',
+         'Fill form and submit "Pay now" (card_number=...)'
+     -> http://127.0.0.1:8971/order-confirmed (external_domain reset to "")
+   Gateway's OWN homepage/pricing/about NEVER reached at all --
+   only 4 states total, none of them the gateway's marketing pages.
+   Gateway homepage link recorded: "outside excursion scope (not a
+   form field/submit or a progression-like action on 127.0.0.1:8972)"
+
+2) excursion_max_depth=4 against a 7-step off-domain chain:
+   reaches step1->step2->step3->step4 (excursion_depth 1,2,3,4), then:
+   "Truncated: excursion depth limit reached (4 consecutive step(s)
+   outside allowed_domains) with 1 further action(s) available from
+   here, never tried" -- step5/6/7/done never reached.
+
+3) gap_analysis exclusion: a flow ending on the excursion domain came
+   back with FlowCoverage.status == "external", excluded from ordinary
+   TCMS matching, correctly counted in summary()["flows_external"].
+```
+
+Regression check: a full saucedemo.com crawl with no `excursion_domains`
+configured at all is unchanged in shape (12 states, 20 flows, same
+single `max_flows` checkpoint) -- the entire feature is a no-op unless
+explicitly opted into.
+
+All 20 existing tests still pass; all fixture servers and ports
+confirmed shut down; no leftover Playwright/headless-Chromium
+processes.
