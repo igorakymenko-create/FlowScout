@@ -96,6 +96,22 @@ verify quickly — it doesn't replace knowing what to point it at.
   so both are exposed rather than guessing which one a given site
   needs. Only ever touches client-side JavaScript timing — a real
   server-side timestamp check is unreachable from outside the browser.
+- **Runs scripted multi-actor scenarios** (`flowscout handoff`) for
+  workflows no single autonomous persona can complete alone — an admin
+  approving a request a different, ordinary user just submitted, then
+  that SAME user (same live session, not just the same persona name)
+  continuing on into whatever the approval unlocked. Each step names
+  its persona and either a direct URL or a bounded, genuinely
+  autonomous search for a state matching some text (exercising the
+  admin's own real navigation, not told the destination); a value
+  captured from one step's URL (e.g. a request id) can be substituted
+  into a later step, and a step can hand off into full, ordinary
+  crawling from wherever it lands. **Known limitation:** nothing in
+  this reads an email inbox — a flow gated behind "click the link we
+  emailed you" cannot be automated by this or any part of FlowScout;
+  it stalls there and reports it honestly (a checkpoint) rather than
+  faking success. See `ROADMAP.md`'s "Multi-actor handoff scenarios"
+  entry.
 - A **local operator UI** (FastAPI + vanilla JS, no build step) to
   configure and run crawls, attach a TCMS export, and browse reports —
   or drive all of this from the CLI / a CI job instead.

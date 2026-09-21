@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import codegen, project_state
 from .change_detection import detect_changes
-from .crawler import crawl
+from .crawler import crawl, run_handoff_scenario
 from .dotenv import load_dotenv
 from .gap_analysis import DEFAULT_THRESHOLD, analyze_gaps
 from .models import ChangeEvent, ChangeReport, GapAnalysis, RunResult
@@ -39,10 +39,7 @@ def _write_outputs(run: RunResult, out_dir: Path, gap: GapAnalysis | None,
           + f", {out_dir / 'report.html'}", file=sys.stderr)
 
 
-def cmd_crawl(args) -> None:
-    config = json.loads(Path(args.config).read_text(encoding="utf-8"))
-    print(f"[flowscout] crawling {config['start_url']} ...", file=sys.stderr)
-    run = crawl(config)
+def _finish_run(run: RunResult, args) -> None:
     s = run.summary()
     print(f"[flowscout] done: {s['states_discovered']} states, {s['flows_total']} flows "
           f"({s['flows_unique']} unique / {s['flows_duplicate']} duplicate / {s['flows_blocked']} blocked), "
@@ -70,6 +67,20 @@ def cmd_crawl(args) -> None:
           f"({project_state.state_path(run.project, project_state.variant_of(run.config))})", file=sys.stderr)
 
     _write_outputs(run, out_dir, gap, changes)
+
+
+def cmd_crawl(args) -> None:
+    config = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    print(f"[flowscout] crawling {config['start_url']} ...", file=sys.stderr)
+    run = crawl(config)
+    _finish_run(run, args)
+
+
+def cmd_handoff(args) -> None:
+    config = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    print(f"[flowscout] running handoff scenario ({len(config['handoff']['steps'])} step(s)) ...", file=sys.stderr)
+    run = run_handoff_scenario(config)
+    _finish_run(run, args)
 
 
 def cmd_gap(args) -> None:
@@ -138,6 +149,14 @@ def main(argv=None):
     p_crawl.add_argument("--tcms", help="optional TCMS CSV export to run gap analysis against")
     p_crawl.add_argument("--gap-threshold", type=float, default=DEFAULT_THRESHOLD)
     p_crawl.set_defaults(func=cmd_crawl)
+
+    p_handoff = sub.add_parser(
+        "handoff", help="run a scripted multi-actor scenario (config's \"handoff\": [{...steps}])")
+    p_handoff.add_argument("--config", required=True, help="path to a run config JSON with a \"handoff\" section")
+    p_handoff.add_argument("--out", required=True, help="output directory for flows.json / report.html")
+    p_handoff.add_argument("--tcms", help="optional TCMS CSV export to run gap analysis against")
+    p_handoff.add_argument("--gap-threshold", type=float, default=DEFAULT_THRESHOLD)
+    p_handoff.set_defaults(func=cmd_handoff)
 
     p_gap = sub.add_parser("gap", help="run gap analysis against an existing crawl (no re-crawl)")
     p_gap.add_argument("--run", required=True, help="directory of a previous crawl (contains flows.json)")

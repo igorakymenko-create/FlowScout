@@ -4941,3 +4941,141 @@ configured is unchanged in shape (12 states, 20 flows, one
 All 20 existing tests still pass; both fixture servers and their
 ports confirmed shut down; no leftover Playwright/headless-Chromium
 processes.
+
+## Multi-actor handoff scenarios (done, Sep 2026)
+
+The gap this closes: everything above `crawl()` operates as ONE
+persona at a time, discovering what that persona alone can reach.
+Real workflows routinely need a SECOND actor to intervene mid-flow --
+an admin approving a request, a moderator reviewing a submission --
+before the FIRST persona can continue. No amount of autonomous DFS
+can invent that correlation; only a human operator can say "this
+request THIS run just created is the one THAT persona needs to act
+on next."
+
+**Design discussion, not a unilateral call.** Two questions were
+worked through with the operator before any code was written:
+
+1. *How does the crawler know where in the admin's own menus to find
+   the specific thing it needs to act on?* Two options were weighed:
+   (A) the operator names the exact destination URL directly -- cheap,
+   but doesn't "understand" anything and breaks the moment the app's
+   own URL scheme changes; (B) a bounded, genuinely autonomous DFS
+   *search* (`"find": {"contains": ..., "search_from": ...}`) for the
+   first state whose URL/title/candidate label contains a target
+   string, using `_run_dfs`'s new `stop_when` early-stop parameter --
+   exercising the admin's OWN real navigation/search UI as a side
+   effect, and an unsuccessful search is itself a reportable finding
+   ("this persona genuinely can't reach anything matching the
+   target"), not a tool failure. (B) was chosen.
+2. *How does the SAME original user's SAME session come back after
+   the admin acts, rather than a fresh login as "the same persona"?*
+   Resolved by `"capture_session"` -- save the acting persona's own
+   live `context.storage_state()` under a name after a step -- and a
+   later step's `"storage_state": "{name}"` resuming it, reusing the
+   existing `storage_state` session-persistence mechanism (built
+   earlier for auth-walled apps) rather than inventing a new concept.
+
+**What got built (`run_handoff_scenario()` in `crawler.py`, parallel
+to `crawl()`/`explore_combination()`/`resume_flow()`):** a thin
+orchestration layer over the SAME engine, not a new one. Exactly two
+new primitives were added to the shared engine itself:
+- `_run_dfs(..., stop_when: StateNode -> bool | None = None)`: checked
+  once per genuinely-new state; on a match, emits the flow and returns
+  that state's fingerprint immediately. Every existing caller ignores
+  the new parameter, so their behavior is byte-for-byte unchanged.
+- `raw_url` threaded through `_discover_state()` -> `_run_path()` ->
+  every call site, alongside the existing (normalized) `url_pattern`.
+
+`config["handoff"]["steps"]` is an ORDERED list, each performed as a
+named persona. A step is either `"seed_url"` (direct navigation,
+`{name}`-templated from an earlier step's `"capture"`) or `"find"`
+(the bounded search above); either way an optional `"action"` clicks a
+candidate by LABEL (never position -- an index would silently point
+at the wrong control if layout shifts between runs) once the step's
+landing state is reached. `"capture": {"from": "url", "pattern": ...,
+"as": name}` extracts a value for later steps to reference as
+`{name}`. `"explore": true` hands a step's landing state off into a
+FULL, ordinary `_run_dfs()` pass -- the answer to "the now-approved
+user logs in and just keeps crawling normally" -- merging every state/
+flow it finds into the SAME `RunResult` (one report, one gap analysis
+for the whole scenario).
+
+**Two real bugs found via live, end-to-end verification (a 4-step
+fixture: user signs up -> submits an access request -> admin finds it
+in a real navigable list and approves it -> same user returns and
+explores a newly-unlocked private area), neither assumed:**
+
+1. **`capture`'s regex could never match.** `pattern=r"/requests/
+   (\d+)/confirmation"` was matched against `url_pattern` --
+   `fingerprint.py`'s `normalize_url()` deliberately collapses numeric/
+   UUID path segments to `*` for stable state-fingerprinting elsewhere
+   in the codebase, so the actual request id was already gone by the
+   time this code saw it (`url='.../requests/*/confirmation'`, never
+   matching a `\d+` pattern). Root-caused by reading `normalize_url()`
+   itself, not guessed. Fixed by threading `raw_url` (the real,
+   un-normalized `page.url`) all the way through and matching
+   `capture` against THAT instead of `url_pattern`.
+2. **A "find" match on a listing page's own link stopped one hop too
+   early.** `matches()` treats a hit on a CANDIDATE's label (e.g. the
+   admin list's own "Review request #1 (alice: need-access)" anchor)
+   the same as a hit on the state's own url/title -- correct for
+   *finding* the right page, but the requested `action` ("Approve")
+   doesn't live on the LISTING page, it lives on whatever that link
+   leads to. Found live: step 3 correctly located `/admin/requests`
+   but then failed with "found a matching state but no candidate
+   labeled 'Approve' there". Fixed by checking whether the found
+   state matches on its OWN url/title; if not (it matched only via a
+   candidate), that one candidate is auto-followed one hop before
+   `action` is looked for, using the same `_run_path`-replay pattern
+   `_handoff_direct_step` already uses.
+
+**Verified live, full 4-step scenario, both bugs fixed:**
+```
+States=9 Flows=7 Checkpoints=0
+  flow 3 (admin, unique): Open "/admin/requests" -> Open "Review
+    request #1 (alice: need-access)" -> Click "Approve"
+  flow 4 (user, unique): Open "/requests/1/status" -> Open "Go to
+    dashboard"
+  flow 5/6 (user, unique): ... -> Open "Profile" / "Settings"
+PASS: signup, submit, admin found+approved via search, same user
+session resumed and explored the newly-unlocked private area
+```
+Also verified through the actual CLI path end-to-end (`flowscout
+handoff --config ... --out ...`, new subcommand added to `cli.py`,
+sharing gap-analysis/change-detection/project-state/report-rendering
+with `crawl` via an extracted `_finish_run()` helper) -- report.html
+renders the handoff's flows and origin notes correctly.
+
+**KNOWN, DISCLOSED LIMITATION (raised explicitly, not left implicit):
+no email/inbox access.** A real-world flow gated behind "click the
+link we emailed you" cannot be automated by this or any part of
+FlowScout -- there is no mail access, and inventing one is out of
+scope. A handoff scenario with an email-verification step in the
+middle will stall there: the FOLLOWING step's `seed_url`/`find` simply
+fails to find what it's looking for, recorded honestly as a
+checkpoint, rather than silently skipping past it or fabricating a
+click that never really happened. Documented in this mechanism's own
+docstring in `crawler.py` as well as here and in `README.md`.
+
+Regression check: a full saucedemo.com crawl via ordinary `crawl()`
+(no `"handoff"` in the config) still completes cleanly after the
+`raw_url` plumbing change -- 19 states, 59 flows (9 unique / 44
+duplicate / 6 blocked), 0 checkpoints -- the entire handoff mechanism
+is a separate entry point (`run_handoff_scenario`), never touched by
+an ordinary crawl.
+
+All 20 existing tests still pass; the handoff fixture server and its
+port confirmed shut down; no leftover Playwright/headless-Chromium
+processes.
+
+**Not yet built: a dedicated web-UI editor for handoff configs.**
+Every other config knob added this session (`storage_state`,
+`variant`, `excursion_domains`, `mock_clock`) is a flat key the
+existing form-based UI already handles; `"handoff"` is a nested,
+ordered list of steps (persona/seed_url/find/action/capture/
+capture_session/explore) that doesn't fit that pattern. Operator's
+call: plan the design (a dedicated per-step form, matching the rest
+of the UI's own style, rather than a raw-JSON textarea shortcut) but
+defer the actual implementation to a later session. For now,
+`flowscout handoff --config ...` (CLI) is the only way to run one.

@@ -207,7 +207,8 @@ class _Frame:
 
 
 def _discover_state(page, allowed_domains, run: RunResult
-                     ) -> tuple[str, str, str, list[ElementCandidate], list[dict], list[dict], list[str], list[str], str]:
+                     ) -> tuple[str, str, str, str, list[ElementCandidate], list[dict], list[dict], list[str], list[str], str]:
+    raw_url = page.url
     url_pattern = normalize_url(page.url)
     title = page.title()
     domain = current_domain(page.url)
@@ -263,7 +264,7 @@ def _discover_state(page, allowed_domains, run: RunResult
         run.skipped_candidates.append({
             "state_fp": fp, "label": o["label"], "reason": o["reason"], "risk": "n/a",
         })
-    return fp, url_pattern, title, candidates, unclassified, disabled, validation_signals, captcha_signals, external_domain
+    return fp, url_pattern, raw_url, title, candidates, unclassified, disabled, validation_signals, captcha_signals, external_domain
 
 
 _CLOCK_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([smhd])$", re.I)
@@ -456,7 +457,7 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
                 ))
                 return None
         try:
-            (fp, url_pattern, title, candidates, unclassified, disabled, validation_signals,
+            (fp, url_pattern, raw_url, title, candidates, unclassified, disabled, validation_signals,
              captcha_signals, external_domain) = _discover_state(page, config["allowed_domains"], run)
         except Exception as exc:
             # Same "was outside any try/except until now" gap as the
@@ -474,7 +475,7 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
             return None
         validation_errors = "; ".join(validation_signals)
         captcha_detected = "; ".join(captcha_signals)
-        return (fp, url_pattern, title, candidates, last_fill_summary, unclassified, disabled,
+        return (fp, url_pattern, raw_url, title, candidates, last_fill_summary, unclassified, disabled,
                 last_choice_state, last_response_status, last_dialog_message, last_opened_new_page,
                 validation_errors, captcha_detected, external_domain)
     finally:
@@ -561,7 +562,7 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
              max_action_repeat: int, allow_mutating: bool,
              states_before: int, flows_before: int, show_persona_suffix: bool,
              seq_to_flow_id: dict[tuple, int], revisit_history: set[str],
-             origin_note: str = "") -> None:
+             origin_note: str = "", stop_when=None) -> "str | None":
     """The DFS loop itself -- extracted (Aug 2026) so crawl()'s own
     per-persona pass and resume_flow()'s targeted continuation from a
     single already-BLOCKED flow can share it instead of duplicating the
@@ -581,7 +582,26 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
     `origin_note`: stamped onto every Flow this call emits (see
     Flow.origin_note's own docstring) -- empty for crawl()'s own normal
     pass, a short note identifying which operator action produced these
-    flows for resume_flow()/explore_combination()'s calls."""
+    flows for resume_flow()/explore_combination()'s calls.
+
+    `stop_when` (Sep 2026, multi-actor handoff scenarios --
+    run_handoff_scenario()'s own "find" step): an optional
+    `StateNode -> bool` predicate, checked once for every genuinely NEW
+    state right after it's discovered and added to `run.states`. The
+    first state it accepts stops the whole DFS immediately (a normal
+    flow is still emitted reaching it, and a checkpoint records that
+    the search stopped early, naming how much was left unexplored --
+    same "state what happened, don't just look identical to a normal
+    finish" discipline `max_flows` truncation already established) and
+    its fingerprint is returned. Returns `None` if the stack drains (or
+    a budget is hit) without `stop_when` ever accepting anything --
+    this is itself a real, reportable finding for a handoff's "find"
+    step (the target persona genuinely can't reach a state matching
+    the target within the given search budget), not a tool failure.
+    `None` (the default) preserves this function's exact original
+    behavior for every existing caller (crawl()/resume_flow()/
+    explore_combination(), none of which pass it or read a return
+    value) -- this parameter is purely additive."""
     def emit_flow(path: list[Transition], end_fp: str, forced_status: FlowStatus | None = None,
                   extra_reason: str = "", resumable: bool = False) -> Flow:
         seq = tuple(t.action_norm_signature for t in path)
@@ -806,7 +826,7 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
                       extra_reason=f"Terminated: action '{trial.action_label}' raised an error")
             continue
 
-        (new_fp, url_pat, title, new_candidates, fill_summary, new_unclassified, new_disabled,
+        (new_fp, url_pat, raw_url, title, new_candidates, fill_summary, new_unclassified, new_disabled,
          choice_state, response_status, dialog_message, opened_new_page, validation_errors,
          captcha_detected, external_domain) = result
         # choice_state (radio/checkbox selections observed at submit time) is
@@ -870,7 +890,7 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
             # neither is accurate for what actually happened.
             trial.outcome = "blocked"
             run.states[new_fp] = StateNode(
-                fingerprint=new_fp, url_pattern=url_pat, raw_url="", title=title,
+                fingerprint=new_fp, url_pattern=url_pat, raw_url=raw_url, title=title,
                 candidates=new_candidates, discovered_by_flow=next_flow_id[0],
                 unclassified_interactive=new_unclassified, disabled_interactive=new_disabled,
                 captcha_detected=captcha_detected, external_domain=external_domain,
@@ -889,13 +909,16 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
                       extra_reason="Truncated: max_states limit reached before this state could be explored")
             continue
 
-        new_node = StateNode(fingerprint=new_fp, url_pattern=url_pat, raw_url="",
+        new_node = StateNode(fingerprint=new_fp, url_pattern=url_pat, raw_url=raw_url,
                               title=title, candidates=new_candidates,
                               discovered_by_flow=next_flow_id[0],
                               unclassified_interactive=new_unclassified,
                               disabled_interactive=new_disabled,
                               external_domain=external_domain)
         run.states[new_fp] = new_node
+        if stop_when is not None and stop_when(new_node):
+            emit_flow(new_path, end_fp=new_fp)
+            return new_fp
         child = _Frame(fp=new_fp, path=new_path)
         # Consecutive, not cumulative -- resets to 0 the moment a step
         # lands back in allowed_domains, so returning from a completed
@@ -911,6 +934,21 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
         if external_domain and new_candidates and not child.order:
             child.any_excursion_capped = True
         stack.append(child)
+
+    if stop_when is not None:
+        # The stack drained (or a budget truncated it) without ever
+        # finding a state stop_when accepted -- itself a real,
+        # reportable finding for a handoff's "find" step (see this
+        # function's own docstring), not silently identical to an
+        # ordinary finished crawl.
+        run.checkpoints.append(Checkpoint(
+            kind="blocked", flow_id=None, state_fp=None,
+            message="Search stopped without finding a matching state"
+                    + (f" for persona '{persona_name}'" if show_persona_suffix else ""),
+            detail=f"Explored {len(run.states) - states_before} new state(s) and "
+                   f"{len(run.flows) - flows_before} flow(s) within budget; none matched.",
+        ))
+    return None
 
 
 def crawl(config: dict) -> RunResult:
@@ -1018,7 +1056,7 @@ def crawl(config: dict) -> RunResult:
                     run.finished_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                     browser.close()
                     return run
-                (root_fp, root_url_pat, root_title, root_candidates, _, root_unclassified,
+                (root_fp, root_url_pat, _, root_title, root_candidates, _, root_unclassified,
                  root_disabled, _, _, _, _, _, root_captcha, root_external_domain) = root
                 run.states[root_fp] = StateNode(
                     fingerprint=root_fp, url_pattern=root_url_pat, raw_url=config["start_url"],
@@ -1079,7 +1117,7 @@ def crawl(config: dict) -> RunResult:
                         # itself (an error, not a warning) -- this seed
                         # URL just isn't explorable, nothing more to do.
                         continue
-                    (seed_fp, seed_url_pat, seed_title, seed_candidates, _, seed_unclassified,
+                    (seed_fp, seed_url_pat, _, seed_title, seed_candidates, _, seed_unclassified,
                      seed_disabled, _, seed_status, seed_dialog, seed_new_page, seed_validation,
                      seed_captcha, seed_external_domain) = seed_result
                     seed_trial.response_status = seed_status
@@ -1409,7 +1447,7 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
             if result is None:
                 raise RuntimeError("the combination failed to apply -- see this run's checkpoints "
                                     "for which step and why")
-            (new_fp, url_pat, title, new_candidates, fill_summary, new_unclassified, new_disabled,
+            (new_fp, url_pat, raw_url, title, new_candidates, fill_summary, new_unclassified, new_disabled,
              choice_state, response_status, dialog_message, opened_new_page, validation_errors,
              captcha_detected, external_domain) = result
 
@@ -1450,7 +1488,7 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
                 last.outcome = "blocked"
                 if new_fp not in run.states:
                     run.states[new_fp] = StateNode(
-                        fingerprint=new_fp, url_pattern=url_pat, raw_url="", title=title,
+                        fingerprint=new_fp, url_pattern=url_pat, raw_url=raw_url, title=title,
                         candidates=new_candidates, discovered_by_flow=next_flow_id[0],
                         unclassified_interactive=new_unclassified, disabled_interactive=new_disabled,
                         captcha_detected=captcha_detected, external_domain=external_domain,
@@ -1467,7 +1505,7 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
             else:
                 last.outcome = "ok"
                 new_node = StateNode(
-                    fingerprint=new_fp, url_pattern=url_pat, raw_url="", title=title,
+                    fingerprint=new_fp, url_pattern=url_pat, raw_url=raw_url, title=title,
                     candidates=new_candidates, discovered_by_flow=next_flow_id[0],
                     unclassified_interactive=new_unclassified, disabled_interactive=new_disabled,
                     external_domain=external_domain,
@@ -1514,3 +1552,456 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
             apply_semantic_dedup(run, threshold=sem_cfg.get("threshold", DEFAULT_THRESHOLD))
         except Exception as exc:  # never let a dedup-pass bug take down an otherwise-successful combination
             run.semantic_dedup_status = f"error on combination: {exc}"
+
+
+_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
+
+
+def _substitute(text: str, values: dict) -> str:
+    """Replaces every `{name}` in `text` with `values[name]`
+    (str-coerced). Raises `KeyError(name)` for a placeholder never
+    captured by an earlier step -- run_handoff_scenario() turns this
+    into a precise checkpoint naming exactly which one, rather than
+    silently leaving the literal `{name}` in a URL/search target."""
+    def repl(m):
+        name = m.group(1)
+        if name not in values:
+            raise KeyError(name)
+        return str(values[name])
+    return _PLACEHOLDER_RE.sub(repl, text)
+
+
+def _handoff_direct_step(browser, config: dict, credentials: dict, seed_url: str,
+                          action_label: str | None, run: RunResult):
+    """One handoff step's "seed_url" mode: a direct-nav to `seed_url`
+    (the exact same mechanism crawl()'s own seed_urls uses), and, if
+    `action_label` is given, finding a candidate matching it there
+    (case-insensitive exact label match -- not a position, which would
+    silently point at the wrong control if the page's layout ever
+    shifts between runs) and replaying both steps together. Returns
+    (result_tuple_from_run_path_or_None, path_so_far, error_or_None)."""
+    seed_el_meta = {"tag": "direct-nav", "href": seed_url, "text": urlsplit(seed_url).path or seed_url}
+    seed_trial = Transition(
+        from_fp="", to_fp=None, action_label=describe_action(seed_el_meta, None),
+        action_norm_signature=f"direct-nav:{normalize_url(seed_url)}",
+        risk=Risk.SAFE, risk_reason="handoff step seed URL",
+        replay_meta=json.dumps(seed_el_meta),
+    )
+    seed_result = _run_path(browser, config, [seed_trial], run, credentials)
+    if seed_result is None:
+        return None, [seed_trial], f"could not reach seed_url '{seed_url}'"
+    (seed_fp, seed_url_pat, _, seed_title, seed_candidates, _, seed_unclassified, seed_disabled,
+     _, _, _, _, _, seed_captcha, seed_external) = seed_result
+    seed_trial.to_fp = seed_fp
+    if seed_fp not in run.states:
+        run.states[seed_fp] = StateNode(
+            fingerprint=seed_fp, url_pattern=seed_url_pat, raw_url=seed_url, title=seed_title,
+            candidates=seed_candidates, unclassified_interactive=seed_unclassified,
+            disabled_interactive=seed_disabled, captcha_detected=seed_captcha, external_domain=seed_external,
+        )
+    if not action_label:
+        return seed_result, [seed_trial], None
+
+    match = next((c for c in seed_candidates if c.label.strip().lower() == action_label.strip().lower()), None)
+    if match is None:
+        return None, [seed_trial], f"no candidate labeled '{action_label}' found at '{seed_url}'"
+    el_meta = json.loads(match.selector)
+    action_trial = Transition(
+        from_fp=seed_fp, to_fp=None, action_label=describe_action(el_meta, None),
+        action_norm_signature=match.norm_signature, risk=match.risk, risk_reason=match.risk_reason,
+        replay_meta=match.selector, is_choice=match.is_choice,
+    )
+    full_path = [seed_trial, action_trial]
+    result = _run_path(browser, config, full_path, run, credentials)
+    if result is None:
+        return None, full_path, f"action '{action_label}' failed"
+    return result, full_path, None
+
+
+def _handoff_find_step(browser, config: dict, credentials: dict, persona_name: str, search_from: str,
+                        contains: str, action_label: str | None, run: RunResult, next_flow_id: list[int]):
+    """One handoff step's "find" mode -- the answer to "how does the
+    crawler know where in the admin's own menus a specific request
+    lives": a bounded, genuinely autonomous DFS search (see _run_dfs's
+    own `stop_when`) from `search_from`, as `persona_name`, for the
+    first state whose url_pattern, title, or any candidate's own label
+    contains `contains` (case-insensitive) -- never told the exact
+    destination, the same way ordinary DFS never is. Everything
+    explored along the way (successful or not) is recorded in `run`
+    like any other exploration; exhausting the budget without finding
+    anything is itself a real, reportable finding (this persona
+    genuinely can't reach a state matching the target), not a tool
+    failure -- see _run_dfs's own stop_when docstring.
+
+    Returns (result_tuple_from_run_path_or_None, path_so_far,
+    error_or_None), same shape as _handoff_direct_step."""
+    seed_el_meta = {"tag": "direct-nav", "href": search_from, "text": urlsplit(search_from).path or search_from}
+    seed_trial = Transition(
+        from_fp="", to_fp=None, action_label=describe_action(seed_el_meta, None),
+        action_norm_signature=f"direct-nav:{normalize_url(search_from)}",
+        risk=Risk.SAFE, risk_reason="handoff find-step search root",
+        replay_meta=json.dumps(seed_el_meta),
+    )
+    root_result = _run_path(browser, config, [seed_trial], run, credentials)
+    if root_result is None:
+        return None, [seed_trial], f"could not reach search_from '{search_from}'"
+    (root_fp, root_url_pat, _, root_title, root_candidates, _, root_unclassified, root_disabled,
+     _, _, _, _, _, root_captcha, root_external) = root_result
+    seed_trial.to_fp = root_fp
+    if root_fp not in run.states:
+        run.states[root_fp] = StateNode(
+            fingerprint=root_fp, url_pattern=root_url_pat, raw_url=search_from, title=root_title,
+            candidates=root_candidates, unclassified_interactive=root_unclassified,
+            disabled_interactive=root_disabled, captcha_detected=root_captcha, external_domain=root_external,
+        )
+    root_node = run.states[root_fp]
+    contains_lower = contains.lower()
+
+    def self_matches(node: StateNode) -> bool:
+        return contains_lower in (node.url_pattern + " " + node.title).lower()
+
+    def matching_candidate(node: StateNode):
+        return next((c for c in node.candidates if contains_lower in c.label.lower()), None)
+
+    def matches(node: StateNode) -> bool:
+        return self_matches(node) or matching_candidate(node) is not None
+
+    if matches(root_node):
+        found_fp, path_to_found = root_fp, [seed_trial]
+    else:
+        limits = config.get("limits", {})
+        frame = _Frame(fp=root_fp, path=[seed_trial])
+        frame.order = _order_for(root_node, limits.get("max_breadth_per_state", 8), run, set())
+        stack = [frame]
+        states_before = len(run.states) - 1
+        flows_before = len(run.flows)
+        found_fp = _run_dfs(
+            browser, config, run, credentials, persona_name, stack, next_flow_id,
+            limits.get("max_depth", 6), limits.get("max_breadth_per_state", 8),
+            limits.get("max_states", 30), limits.get("max_flows", 50),
+            limits.get("max_action_repeat", 2), config.get("allow_mutating", True),
+            states_before, flows_before, False, {}, set(),
+            origin_note=f"Handoff: searching for a state matching '{contains}'",
+            stop_when=matches,
+        )
+        if found_fp is None:
+            return None, [seed_trial], f"no state found matching '{contains}' within budget"
+        # discovered_by_flow is only ever unset for a TRUE crawl root
+        # (empty path) -- see _path_to_state's own docstring. This
+        # frame's own root is a seed, not that root, but it never goes
+        # through emit_flow() either, so the same "empty path" special
+        # case would silently misfire for it too if found_fp == root_fp.
+        path_to_found = [seed_trial] if found_fp == root_fp else _path_to_state(run, found_fp)
+
+    # "matches" allows a hit on a CANDIDATE's own label (e.g. a listing
+    # page's "Review request #482" link) as well as the state's own
+    # url/title -- found live: without following that link, "found" was
+    # left pointing at the LISTING page, where the requested action_label
+    # (e.g. "Approve") never actually lives; it's one hop further, on
+    # whatever that specific link leads to. A self-match needs no extra
+    # hop; a candidate-only match does.
+    found_node = run.states[found_fp]
+    if not self_matches(found_node):
+        link = matching_candidate(found_node)
+        if link is None:
+            return None, path_to_found, f"matched '{contains}' but the link it came from is no longer present"
+        el_meta = json.loads(link.selector)
+        follow_trial = Transition(
+            from_fp=found_fp, to_fp=None, action_label=describe_action(el_meta, None),
+            action_norm_signature=link.norm_signature, risk=link.risk, risk_reason=link.risk_reason,
+            replay_meta=link.selector, is_choice=link.is_choice,
+        )
+        follow_path = path_to_found + [follow_trial]
+        follow_result = _run_path(browser, config, follow_path, run, credentials)
+        if follow_result is None:
+            return None, follow_path, f"found a link matching '{contains}' but following it failed"
+        (new_fp, new_url_pat, new_raw_url, new_title, new_candidates, _, new_unclassified, new_disabled,
+         _, _, _, _, _, new_captcha, new_external) = follow_result
+        follow_trial.to_fp = new_fp
+        if new_fp not in run.states:
+            run.states[new_fp] = StateNode(
+                fingerprint=new_fp, url_pattern=new_url_pat, raw_url=new_raw_url, title=new_title,
+                candidates=new_candidates, unclassified_interactive=new_unclassified,
+                disabled_interactive=new_disabled, captcha_detected=new_captcha, external_domain=new_external,
+            )
+        found_fp, path_to_found = new_fp, follow_path
+
+    if not action_label:
+        # Re-replay the found path once more to read a clean, current
+        # result tuple for the caller's own capture/explore handling --
+        # same reset+replay principle this whole crawler already
+        # relies on for everything else, not a special case.
+        result = _run_path(browser, config, path_to_found, run, credentials)
+        return result, path_to_found, (None if result else "could not replay to the found state")
+
+    node = run.states[found_fp]
+    match = next((c for c in node.candidates if c.label.strip().lower() == action_label.strip().lower()), None)
+    if match is None:
+        return None, path_to_found, f"found a matching state but no candidate labeled '{action_label}' there"
+    el_meta = json.loads(match.selector)
+    action_trial = Transition(
+        from_fp=found_fp, to_fp=None, action_label=describe_action(el_meta, None),
+        action_norm_signature=match.norm_signature, risk=match.risk, risk_reason=match.risk_reason,
+        replay_meta=match.selector, is_choice=match.is_choice,
+    )
+    full_path = path_to_found + [action_trial]
+    result = _run_path(browser, config, full_path, run, credentials)
+    if result is None:
+        return None, full_path, f"action '{action_label}' failed"
+    return result, full_path, None
+
+
+def run_handoff_scenario(config: dict) -> RunResult:
+    """Executes a scripted, multi-actor scenario -- `config["handoff"]
+    ["steps"]`, an ORDERED list of steps, each performed as a named
+    persona (`config["personas"]`). Unlike crawl()'s own autonomous
+    DFS, a handoff can never be discovered on its own: correlating
+    "the request THIS run's employee persona just created" with "the
+    one request an admin persona needs to approve" requires a human to
+    say so explicitly -- the same reasoning explore_combination() is
+    already built on.
+
+    Each step is EITHER:
+    - `"seed_url"` (a direct navigation, `{name}`-templated from an
+      earlier step's own `capture`) -- for when the operator already
+      knows exactly where this step needs to land, or
+    - `"find": {"contains": ..., "search_from": ...}` -- a bounded,
+      genuinely autonomous DFS search (see `_run_dfs`'s own
+      `stop_when`) for a state whose URL/title/candidate labels
+      contain the (also `{name}`-templated) target string, run AS the
+      step's own persona from `search_from` (default:
+      `config["start_url"]`). This is the answer to "how does the
+      crawler know where in the admin's own menus to find this one
+      specific request" -- it doesn't need to be told the URL, it
+      searches for it the same way DFS already searches for anything
+      else, just with an early-stop condition. A search that exhausts
+      its budget without finding anything is recorded as its own
+      checkpoint -- a real, reportable finding (this persona genuinely
+      can't reach anything matching the target), not a tool failure.
+      A match can land on the target's OWN url/title, or on a
+      CANDIDATE's label sitting on some other state (e.g. a listing
+      page's own "Review request #482" link) -- found live: the
+      latter needs one more hop, automatically followed, since the
+      requested `action` (e.g. "Approve") typically lives on whatever
+      that link leads to, not on the listing page itself.
+
+    Either way, an optional `"action"` names a candidate (by LABEL, not
+    position -- an index would silently point at the wrong control if
+    a page's layout shifts between runs) to click once that step's
+    landing state is reached.
+
+    `"storage_state"` on a step is either a literal value (a path/dict,
+    exactly like the top-level config's own `storage_state`) or a
+    `{name}` reference to an EARLIER step's own `"capture_session"` --
+    the mechanism that lets a LATER step resume the exact live session
+    an earlier step's persona was using, not just log back in as "the
+    same persona" from a fresh, unauthenticated context. Necessary for
+    e.g. "the user who just registered and submitted a request needs
+    to come back, once approved, as THAT SAME (now-approved) account"
+    -- a fresh login wouldn't be wrong exactly, but the whole point of
+    a handoff is continuity of the SAME session across steps.
+
+    `"capture": {"from": "url", "pattern": <regex>, "as": <name>}`
+    extracts a value from the step's OWN resulting url_pattern via a
+    regex capture group, for a LATER step's `seed_url`/`find.contains`
+    to reference as `{name}`. Deliberately URL-only, not page text --
+    a structural signal, not a fragile text-scrape.
+
+    `"explore": true` hands off into a FULL, ordinary autonomous DFS
+    crawl from this step's own landing state (the run's normal limits,
+    same persona, same live session) -- the answer to "the approved
+    user logs in and just keeps crawling normally", reusing `_run_dfs`
+    exactly as `crawl()`'s own per-persona pass and
+    `explore_combination()` already do, merging every state/flow it
+    finds into this SAME `RunResult` (one report, one gap analysis for
+    the whole scenario, not a separate result per step).
+
+    KNOWN, DISCLOSED LIMITATION: nothing in this mechanism can read an
+    email inbox. A real-world signup flow gated behind "click the link
+    we emailed you" cannot be automated by this or any part of
+    FlowScout -- there is no mail access, and inventing one is out of
+    scope. A handoff scenario with an email-verification step in the
+    middle will stall there (the following step's `seed_url`/`find`
+    will simply fail to find what it's looking for, recorded honestly
+    as a checkpoint) rather than silently skipping past it or
+    fabricating a click that never really happened."""
+    from playwright.sync_api import sync_playwright
+
+    steps = config["handoff"]["steps"]
+    if not steps:
+        raise ValueError("handoff.steps must have at least one step")
+
+    personas_cfg = config.get("personas") or [{"name": "default", "credentials": config.get("credentials", {})}]
+    creds_by_persona = {p.get("name", "default"): p.get("credentials", {}) for p in personas_cfg}
+
+    run = RunResult(project=config["project"], start_url=config["start_url"], config=config)
+    run.started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    captured_values: dict[str, str] = {}
+    captured_sessions: dict[str, dict] = {}
+    next_flow_id = [1]
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        try:
+            for i, step in enumerate(steps):
+                where = f"handoff step {i + 1}/{len(steps)}"
+                persona_name = step.get("persona", "default")
+                if persona_name not in creds_by_persona:
+                    run.checkpoints.append(Checkpoint(
+                        kind="error", flow_id=None, state_fp=None,
+                        message=f"{where}: unknown persona '{persona_name}'",
+                        detail=f"Known personas: {sorted(creds_by_persona)}",
+                    ))
+                    break
+                credentials = creds_by_persona[persona_name]
+
+                storage_state = None
+                raw_storage_state = step.get("storage_state")
+                if raw_storage_state:
+                    m = _PLACEHOLDER_RE.fullmatch(raw_storage_state) if isinstance(raw_storage_state, str) else None
+                    if m:
+                        session_name = m.group(1)
+                        if session_name not in captured_sessions:
+                            run.checkpoints.append(Checkpoint(
+                                kind="error", flow_id=None, state_fp=None,
+                                message=f"{where}: no captured session named '{session_name}'",
+                                detail=f"Captured so far: {sorted(captured_sessions)}",
+                            ))
+                            break
+                        storage_state = captured_sessions[session_name]
+                    else:
+                        storage_state = raw_storage_state
+                step_config = {**config, "storage_state": storage_state}
+
+                result = None
+                path: list[Transition] = []
+                err = None
+                try:
+                    if "seed_url" in step:
+                        seed_url = _substitute(step["seed_url"], captured_values)
+                        result, path, err = _handoff_direct_step(
+                            browser, step_config, credentials, seed_url, step.get("action"), run)
+                    elif "find" in step:
+                        find_cfg = step["find"]
+                        contains = _substitute(find_cfg["contains"], captured_values)
+                        search_from = _substitute(find_cfg.get("search_from", config["start_url"]), captured_values)
+                        result, path, err = _handoff_find_step(
+                            browser, step_config, credentials, persona_name, search_from, contains,
+                            step.get("action"), run, next_flow_id)
+                    else:
+                        err = f"{where}: needs either 'seed_url' or 'find'"
+                except KeyError as exc:
+                    err = f"{where}: references {{{exc.args[0]}}}, never captured by an earlier step"
+
+                if err:
+                    run.checkpoints.append(Checkpoint(
+                        kind="error", flow_id=None,
+                        state_fp=next((t.to_fp for t in reversed(path) if t.to_fp), None),
+                        message=f"{where} failed", detail=err,
+                    ))
+                    break
+
+                (fp, url_pat, raw_url, title, candidates, _, unclassified, disabled,
+                 _, _, _, _, _, captcha_detected, external_domain) = result
+                if fp not in run.states:
+                    run.states[fp] = StateNode(
+                        fingerprint=fp, url_pattern=url_pat, raw_url=raw_url, title=title, candidates=candidates,
+                        discovered_by_flow=next_flow_id[0], unclassified_interactive=unclassified,
+                        disabled_interactive=disabled, captcha_detected=captcha_detected,
+                        external_domain=external_domain,
+                    )
+                # Recorded as its own flow so the scenario's report
+                # shows every step, not just whatever "explore" finds
+                # afterward.
+                run.flows.append(Flow(
+                    id=next_flow_id[0], status=FlowStatus.UNIQUE, duplicate_of=None,
+                    dedup_reason=f"{where}: {' -> '.join(t.action_label for t in path)}",
+                    transitions=path, end_state_fp=fp, persona=persona_name,
+                    origin_note="Multi-actor handoff scenario",
+                ))
+                next_flow_id[0] += 1
+
+                capture_cfg = step.get("capture")
+                if capture_cfg:
+                    # Matched against raw_url (the real, un-normalized
+                    # page.url), not url_pat -- normalize_url() collapses
+                    # numeric/UUID path segments to "*" for stable state
+                    # fingerprinting (see fingerprint.py), which would make
+                    # a capture pattern like r"/requests/(\d+)/confirmation"
+                    # structurally unable to ever match (found live: the
+                    # digits are already gone by the time url_pat exists).
+                    m = re.search(capture_cfg["pattern"], raw_url)
+                    if not m:
+                        run.checkpoints.append(Checkpoint(
+                            kind="error", flow_id=None, state_fp=fp,
+                            message=f"{where}: capture pattern didn't match the resulting URL",
+                            detail=f"pattern={capture_cfg['pattern']!r} url={raw_url!r}",
+                        ))
+                        break
+                    captured_values[capture_cfg["as"]] = m.group(1) if m.groups() else m.group(0)
+
+                session_name = step.get("capture_session")
+                if session_name:
+                    # Needs a LIVE context -- the one _run_path used
+                    # above already closed (fresh-context-per-path is
+                    # this whole crawler's own architecture, see this
+                    # file's top-of-file docstring), so this replays
+                    # the step's OWN path once more in a fresh context
+                    # to reach the same logged-in state and saves ITS
+                    # storage_state, rather than threading a live
+                    # context handle out of _run_path -- which would
+                    # break the "every replay is independent, fresh,
+                    # closed" invariant every other feature here relies
+                    # on.
+                    context = (browser.new_context(storage_state=storage_state) if storage_state
+                               else browser.new_context())
+                    page = context.new_page()
+                    try:
+                        page.goto(config["start_url"], wait_until="load")
+                        for t in path:
+                            perform_action(page, json.loads(t.replay_meta), credentials,
+                                            timeout_ms=config.get("limits", {}).get("action_timeout_ms", 8000))
+                        captured_sessions[session_name] = context.storage_state()
+                    except Exception as exc:
+                        run.checkpoints.append(Checkpoint(
+                            kind="error", flow_id=None, state_fp=fp,
+                            message=f"{where}: could not capture session '{session_name}'",
+                            detail=str(exc)[:1200],
+                        ))
+                        context.close()
+                        break
+                    context.close()
+
+                if step.get("explore"):
+                    limits = config.get("limits", {})
+                    max_depth = limits.get("max_depth", 6)
+                    max_breadth = limits.get("max_breadth_per_state", 8)
+                    max_states = limits.get("max_states", 30)
+                    max_flows = limits.get("max_flows", 50)
+                    max_action_repeat = limits.get("max_action_repeat", 2)
+                    allow_mutating = config.get("allow_mutating", True)
+                    node = run.states[fp]
+                    frame = _Frame(fp=fp, path=path)
+                    frame.order = _order_for(node, max_breadth, run, set())
+                    stack = [frame]
+                    states_before = len(run.states) - 1
+                    flows_before = len(run.flows)
+                    _run_dfs(browser, step_config, run, credentials, persona_name, stack, next_flow_id,
+                             max_depth, max_breadth, max_states, max_flows, max_action_repeat, allow_mutating,
+                             states_before, flows_before, False, {}, set(),
+                             origin_note=f"{where}: continued exploring after the handoff")
+        finally:
+            browser.close()
+
+    sem_cfg = config.get("semantic_dedup", {})
+    if sem_cfg.get("enabled", True):
+        try:
+            apply_semantic_dedup(run, threshold=sem_cfg.get("threshold", DEFAULT_THRESHOLD))
+        except Exception as exc:  # never let a dedup-pass bug take down an otherwise-successful scenario
+            run.semantic_dedup_status = f"error: {exc}"
+    else:
+        run.semantic_dedup_status = "skipped: disabled in config"
+
+    run.finished_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return run
