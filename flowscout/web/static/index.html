@@ -201,6 +201,21 @@ button.secondary {
     <input id="f-variant" type="text" placeholder="customer-acme / flags-on / staging-eu">
     <p class="hint">Which configuration of the app this run covers — a customer/tenant, a feature-flag set, an environment. Change detection compares a run only against previous runs with the <b>same</b> label, so two customers sharing one entry point never get diffed against each other.</p>
 
+    <h2>Third-party excursions <button type="button" class="icon-btn help-trigger" data-help="excursion" title="Payment/OAuth integrations">?</button></h2>
+    <label for="f-excursion-domains">Excursion domains (comma-separated)</label>
+    <input id="f-excursion-domains" type="text" placeholder="*.stripe.com, accounts.google.com">
+    <div class="row2">
+      <div>
+        <label for="f-excursion-depth">Max excursion depth</label>
+        <input id="f-excursion-depth" type="number" min="1" value="4">
+      </div>
+      <div>
+        <label for="f-excursion-breadth">Max excursion breadth</label>
+        <input id="f-excursion-breadth" type="number" min="1" value="1">
+      </div>
+    </div>
+    <p class="hint">Only a domain listed here can be followed off-app at all — an ordinary external link stays destructive regardless. Once there, only a real progression control (a form button, or a "pay"/"continue"-style action) gets tried; breadth stays low on purpose so the walk follows one path through instead of wandering into the third party's own site.</p>
+
     <h2>Direct URL seeding <button type="button" class="icon-btn help-trigger" data-help="seed-urls" title="What this is for">?</button></h2>
     <label for="f-sitemap-url">Sitemap URL (optional)</label>
     <input id="f-sitemap-url" type="text" placeholder="https://example.com/sitemap.xml">
@@ -296,6 +311,9 @@ button.secondary {
 
       <h4 id="help-variant">Configuration label (variant)</h4>
       <p>Names <b>which configuration of the app</b> a run covers — one customer/tenant, one feature-flag set, one environment. It changes nothing about how the crawl itself runs; it scopes the durable project state that <b>change detection</b> compares against (<code>projects/&lt;project&gt;/variants/&lt;variant&gt;/state.json</code>). Without it, crawling customer A and then customer B under the same project name diffs B against A's baseline: every flow unique to A reads as &ldquo;missing since last run&rdquo; and every flow unique to B as &ldquo;new&rdquo;, when nothing actually changed in either system. Leave it blank for a single-configuration project — that keeps the original, unscoped state file, exactly as before this existed.</p>
+
+      <h4 id="help-excursion">Third-party excursions</h4>
+      <p>Any navigation off <code>allowed_domains</code> is normally <b>destructive</b> and never followed — a payment gateway, an OAuth/SSO provider, or a billing portal would otherwise be structurally invisible. Listing a domain here (wildcards allowed, e.g. <code>*.stripe.com</code>) approves it specifically, with a much narrower budget than the app itself gets: breadth capped low (default 1 — follow one path through, don't branch into the third party's own marketing pages) and depth capped independently of the app's own Max depth (default 4 — a real integration is typically a handful of screens). Once back in <code>allowed_domains</code>, both caps reset and ordinary exploration resumes. Only a real progression control (a form's own button/input, or one matching a "pay"/"continue"/"confirm"-style action) is ever tried there — never a plain link, which is exactly the "wander to another page" affordance this is built to avoid.</p>
 
       <h4 id="help-seed-urls">Direct URL seeding</h4>
       <p>The crawler otherwise only ever finds what it can click its way to from Start URL — a page with no inbound link anywhere in the crawled UI (a deep-linked SPA route, an old landing page still live but delisted from navigation) is invisible no matter how thoroughly the rest of the app gets explored. A <b>Sitemap URL</b> is fetched and parsed automatically (a plain sitemap, or a sitemap index of child sitemaps, recursed one level); <b>Additional seed URLs</b> is a plain list you already know about. Either way, each one is explored with the crawler's full normal logic from there onward, not just visited once and left alone — reported as its own "Open URL directly" flow, plus whatever it leads to. Filtered exactly like an ordinary link: dropped if outside Allowed domains, dropped if it matches an Exclude URL pattern, dropped if it's just Start URL itself. Capped at 50 seed URLs by default (a real sitemap can list thousands; raise it with <code>max_seed_urls</code> in a JSON config if you actually want that).</p>
@@ -552,6 +570,9 @@ function resetForm() {
   document.getElementById('f-domains').value = '';
   document.getElementById('f-exclude').value = '';
   document.getElementById('f-variant').value = '';
+  document.getElementById('f-excursion-domains').value = '';
+  document.getElementById('f-excursion-depth').value = 4;
+  document.getElementById('f-excursion-breadth').value = 1;
   document.getElementById('f-sitemap-url').value = '';
   document.getElementById('f-seed-urls').value = '';
   document.getElementById('f-embeddings-provider').value = 'gemini';
@@ -591,6 +612,9 @@ function fillForm(cfg) {
   document.getElementById('f-domains').value = (cfg.allowed_domains || []).join(', ');
   document.getElementById('f-exclude').value = (cfg.exclude_patterns || []).join(', ');
   document.getElementById('f-variant').value = cfg.variant || '';
+  document.getElementById('f-excursion-domains').value = (cfg.excursion_domains || []).join(', ');
+  document.getElementById('f-excursion-depth').value = cfg.excursion_max_depth ?? 4;
+  document.getElementById('f-excursion-breadth').value = cfg.excursion_max_breadth ?? 1;
   document.getElementById('f-sitemap-url').value = cfg.sitemap_url || '';
   document.getElementById('f-seed-urls').value = (cfg.seed_urls || []).join(', ');
   document.getElementById('f-embeddings-provider').value = cfg.embeddings_provider || 'gemini';
@@ -650,6 +674,9 @@ function collectConfig() {
     allowed_domains: splitList(document.getElementById('f-domains').value),
     exclude_patterns: splitList(document.getElementById('f-exclude').value),
     variant: document.getElementById('f-variant').value.trim(),
+    excursion_domains: splitList(document.getElementById('f-excursion-domains').value),
+    excursion_max_depth: Number(document.getElementById('f-excursion-depth').value) || 4,
+    excursion_max_breadth: Number(document.getElementById('f-excursion-breadth').value) || 1,
     sitemap_url: document.getElementById('f-sitemap-url').value.trim(),
     seed_urls: splitList(document.getElementById('f-seed-urls').value),
     embeddings_provider: document.getElementById('f-embeddings-provider').value || 'gemini',
