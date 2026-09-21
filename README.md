@@ -88,6 +88,14 @@ verify quickly — it doesn't replace knowing what to point it at.
   real integration through to completion instead of wandering into the
   third party's own marketing pages, then resumes ordinary exploration
   the moment it returns.
+- **Gets past a client-side time-gated control** (a "resend code in
+  00:30" cooldown, an "available starting &lt;date&gt;" check) via
+  `"mock_clock"` — `start_at` answers an absolute-deadline check made
+  at page load, `fast_forward` answers a `setTimeout`/`setInterval`
+  cooldown; the two don't substitute for each other (verified live),
+  so both are exposed rather than guessing which one a given site
+  needs. Only ever touches client-side JavaScript timing — a real
+  server-side timestamp check is unreachable from outside the browser.
 - A **local operator UI** (FastAPI + vanilla JS, no build step) to
   configure and run crawls, attach a TCMS export, and browse reports —
   or drive all of this from the CLI / a CI job instead.

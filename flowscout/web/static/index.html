@@ -201,6 +201,13 @@ button.secondary {
     <input id="f-variant" type="text" placeholder="customer-acme / flags-on / staging-eu">
     <p class="hint">Which configuration of the app this run covers — a customer/tenant, a feature-flag set, an environment. Change detection compares a run only against previous runs with the <b>same</b> label, so two customers sharing one entry point never get diffed against each other.</p>
 
+    <h2>Mock clock <button type="button" class="icon-btn help-trigger" data-help="mock-clock" title="Getting past a time-gated control">?</button></h2>
+    <label for="f-clock-start-at">Start at (optional, ISO date)</label>
+    <input id="f-clock-start-at" type="text" placeholder="2027-01-01T00:00:00Z">
+    <label for="f-clock-fast-forward">Fast forward (optional)</label>
+    <input id="f-clock-fast-forward" type="text" placeholder="30d, 90s, or milliseconds">
+    <p class="hint">Two independent mechanisms — they don't substitute for each other. "Start at" answers a deadline checked once at page load; "Fast forward" answers a countdown/cooldown timer. Only affects client-side JavaScript timing, never a server-side check.</p>
+
     <h2>Third-party excursions <button type="button" class="icon-btn help-trigger" data-help="excursion" title="Payment/OAuth integrations">?</button></h2>
     <label for="f-excursion-domains">Excursion domains (comma-separated)</label>
     <input id="f-excursion-domains" type="text" placeholder="*.stripe.com, accounts.google.com">
@@ -311,6 +318,9 @@ button.secondary {
 
       <h4 id="help-variant">Configuration label (variant)</h4>
       <p>Names <b>which configuration of the app</b> a run covers — one customer/tenant, one feature-flag set, one environment. It changes nothing about how the crawl itself runs; it scopes the durable project state that <b>change detection</b> compares against (<code>projects/&lt;project&gt;/variants/&lt;variant&gt;/state.json</code>). Without it, crawling customer A and then customer B under the same project name diffs B against A's baseline: every flow unique to A reads as &ldquo;missing since last run&rdquo; and every flow unique to B as &ldquo;new&rdquo;, when nothing actually changed in either system. Leave it blank for a single-configuration project — that keeps the original, unscoped state file, exactly as before this existed.</p>
+
+      <h4 id="help-mock-clock">Mock clock</h4>
+      <p>Gets past a control gated behind client-side time — a "resend code in 00:30" cooldown, an "available starting &lt;date&gt;" check. Two <b>independent</b> Playwright Clock API mechanisms, verified live to NOT substitute for each other: <b>Start at</b> (<code>page.clock.install(time=...)</code>, before the page loads) answers a <code>Date.now()</code>/<code>new Date()</code> comparison against an absolute deadline, checked once at load — fast-forwarding afterward does nothing for this case, since the check already ran. <b>Fast forward</b> (<code>page.clock.fast_forward(...)</code>, applied once right after the page's own initial load) answers a <code>setTimeout</code>/<code>setInterval</code>-scheduled cooldown — pre-setting a future start date does nothing for this case, since a timer scheduled at load always waits its own full duration regardless of what date it thinks it is. A real site can use either pattern; set whichever one matches what you know about the target, or both. Accepts a friendly <code>"&lt;N&gt;&lt;unit&gt;"</code> duration (<code>s</code>/<code>m</code>/<code>h</code>/<code>d</code>, e.g. <code>30d</code>), raw milliseconds, or Playwright's own <code>"HH:MM:SS"</code> form. Only ever touches client-side JavaScript timing — a real timestamp checked by the app's own backend is unreachable from outside the browser, and this can't do anything about it.</p>
 
       <h4 id="help-excursion">Third-party excursions</h4>
       <p>Any navigation off <code>allowed_domains</code> is normally <b>destructive</b> and never followed — a payment gateway, an OAuth/SSO provider, or a billing portal would otherwise be structurally invisible. Listing a domain here (wildcards allowed, e.g. <code>*.stripe.com</code>) approves it specifically, with a much narrower budget than the app itself gets: breadth capped low (default 1 — follow one path through, don't branch into the third party's own marketing pages) and depth capped independently of the app's own Max depth (default 4 — a real integration is typically a handful of screens). Once back in <code>allowed_domains</code>, both caps reset and ordinary exploration resumes. Only a real progression control (a form's own button/input, or one matching a "pay"/"continue"/"confirm"-style action) is ever tried there — never a plain link, which is exactly the "wander to another page" affordance this is built to avoid.</p>
@@ -570,6 +580,8 @@ function resetForm() {
   document.getElementById('f-domains').value = '';
   document.getElementById('f-exclude').value = '';
   document.getElementById('f-variant').value = '';
+  document.getElementById('f-clock-start-at').value = '';
+  document.getElementById('f-clock-fast-forward').value = '';
   document.getElementById('f-excursion-domains').value = '';
   document.getElementById('f-excursion-depth').value = 4;
   document.getElementById('f-excursion-breadth').value = 1;
@@ -612,6 +624,9 @@ function fillForm(cfg) {
   document.getElementById('f-domains').value = (cfg.allowed_domains || []).join(', ');
   document.getElementById('f-exclude').value = (cfg.exclude_patterns || []).join(', ');
   document.getElementById('f-variant').value = cfg.variant || '';
+  const mockClock = cfg.mock_clock || {};
+  document.getElementById('f-clock-start-at').value = mockClock.start_at || '';
+  document.getElementById('f-clock-fast-forward').value = mockClock.fast_forward || '';
   document.getElementById('f-excursion-domains').value = (cfg.excursion_domains || []).join(', ');
   document.getElementById('f-excursion-depth').value = cfg.excursion_max_depth ?? 4;
   document.getElementById('f-excursion-breadth').value = cfg.excursion_max_breadth ?? 1;
@@ -674,6 +689,15 @@ function collectConfig() {
     allowed_domains: splitList(document.getElementById('f-domains').value),
     exclude_patterns: splitList(document.getElementById('f-exclude').value),
     variant: document.getElementById('f-variant').value.trim(),
+    ...(() => {
+      const startAt = document.getElementById('f-clock-start-at').value.trim();
+      const fastForward = document.getElementById('f-clock-fast-forward').value.trim();
+      if (!startAt && !fastForward) return {};
+      const mockClock = {};
+      if (startAt) mockClock.start_at = startAt;
+      if (fastForward) mockClock.fast_forward = fastForward;
+      return {mock_clock: mockClock};
+    })(),
     excursion_domains: splitList(document.getElementById('f-excursion-domains').value),
     excursion_max_depth: Number(document.getElementById('f-excursion-depth').value) || 4,
     excursion_max_breadth: Number(document.getElementById('f-excursion-breadth').value) || 1,

@@ -4847,3 +4847,97 @@ explicitly opted into.
 All 20 existing tests still pass; all fixture servers and ports
 confirmed shut down; no leftover Playwright/headless-Chromium
 processes.
+
+## Time-gated content: client-side clock mocking (done, Sep 2026)
+
+Second of the four remaining items from two entries above. A control
+gated behind "resend code in 00:30", "available starting <date>", or
+"come back in 30 days" was previously indistinguishable from a
+permanently unavailable one -- `disabled_interactive` already
+surfaced it as "a real control, currently disabled" (see its own
+docstring), but nothing could get PAST that to see what it unlocks.
+
+**Deliberately not a "time-gate detector."** Considered and rejected:
+unlike CAPTCHA (reCAPTCHA/hCaptcha/Turnstile all have vendor-
+documented, structural markers -- an iframe src pattern, a widget
+class name -- that are facts about the DOM, not guesses), there is no
+equivalent standard for "this control is time-gated" -- every app
+implements a countdown/deadline check differently, in its own
+JavaScript, with no shared markup convention to key off. A text-based
+detector ("contains a countdown", "says 'available in'") would be
+exactly the English-language-dependent guess this project already
+rejected once for field_detect.py's own login-trigger matching. Built
+a real capability instead of a guessed signal: `config["mock_clock"]`
+exposes Playwright's own Clock API directly, so an operator who
+already suspects (or knows) a control is time-gated can try to get
+past it, without FlowScout ever having to correctly identify the gate
+on its own first.
+
+**Two independent mechanisms, verified live to NOT substitute for each
+other -- a real finding, not assumed from the API docs alone:**
+- `mock_clock.start_at` (`page.clock.install(time=...)`, before the
+  page ever loads) answers a `Date.now()`/`new Date()` comparison
+  against an absolute deadline, checked synchronously at load (e.g.
+  "available starting 2027-01-01"). Verified live with a fixture doing
+  exactly that check: installing the clock at real "now" and calling
+  `fast_forward()` a full YEAR afterward did nothing at all -- the
+  comparison had already run, against the original time, before
+  `fast_forward` was ever called. Only pre-setting `start_at` to a
+  point past the deadline worked.
+- `mock_clock.fast_forward` (`page.clock.fast_forward(...)`, applied
+  once right after the page's own initial load) answers a
+  `setTimeout`/`setInterval`-scheduled cooldown (e.g. a real 30-second
+  "resend code" button, disabled via JS until a timer fires).
+  Verified live with a separate fixture: pre-setting `start_at` to a
+  point a year in the future did nothing for this one either -- a
+  timer scheduled at load always waits its own full duration from
+  that moment, regardless of what date it thinks it currently is.
+  Only `fast_forward()`, called after that load, worked.
+
+Neither is a superset of the other; a real site can use either pattern
+(or, in principle, both, on different controls). `mock_clock` exposes
+both documented primitives as independent config keys and lets the
+operator pick, rather than guessing which one a given site's
+implementation actually needs.
+
+**Explicitly out of scope, disclosed rather than glossed over: this
+only ever touches client-side JavaScript timing.** A real, more common
+production pattern -- a timestamp stored server-side, checked by the
+backend on the next request -- is genuinely unreachable from outside
+the browser. No client-side mechanism, this or any other, can fake
+what a server believes the date is. `mock_clock` helps exactly the
+class of gate implemented in the page's own JS and nothing past that
+boundary; ROADMAP.md's own "undiscovered vs. uncovered" entry already
+covers why a tool operating from outside the app can't do better here.
+
+**Built:** `_run_path()` (`crawler.py`) installs the clock right after
+context/page creation (same place `storage_state` already does, and
+for the same reason: every fresh replay context needs it, not just
+root discovery), and applies `fast_forward` once, right after the
+initial `page.goto()` succeeds -- before any of the replayed path
+steps run, so ordinary exploration proceeds from an already-time-
+travelled state without repeating the jump on every subsequent click.
+A small `_parse_clock_duration()` helper accepts a friendly `"<N>
+<unit>"` string (`s`/`m`/`h`/`d`, e.g. `"30d"`) alongside raw
+milliseconds and Playwright's own native `"HH:MM:SS"` string form --
+Playwright's own `fast_forward()` has no day/hour shorthand of its
+own. A failure to install or fast-forward the clock (a malformed
+`start_at`, an invalid duration) degrades to a checkpoint and returns
+`None` for that replay, the same pattern `storage_state` already
+established, rather than silently proceeding as if nothing were
+configured.
+
+**Verified live, through the full real `crawl()` pipeline, against
+both fixture types:** a `setTimeout`-gated button (disabled for 30
+real seconds) discovered as 0 real candidates without `mock_clock`,
+and correctly discovered as a real, clickable candidate
+(`fast_forward: "35s"`) with it; a `Date.now()`-comparison-gated
+button (available starting a fixed future date) likewise went from
+undiscoverable to discoverable with `start_at` set past that date.
+Regression check: a full saucedemo.com crawl with no `mock_clock`
+configured is unchanged in shape (12 states, 20 flows, one
+`max_flows` checkpoint) -- the feature is a no-op unless opted into.
+
+All 20 existing tests still pass; both fixture servers and their
+ports confirmed shut down; no leftover Playwright/headless-Chromium
+processes.

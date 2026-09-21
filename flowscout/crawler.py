@@ -22,6 +22,7 @@ Design notes (why it's built this way, not the naive way):
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -265,6 +266,27 @@ def _discover_state(page, allowed_domains, run: RunResult
     return fp, url_pattern, title, candidates, unclassified, disabled, validation_signals, captcha_signals, external_domain
 
 
+_CLOCK_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([smhd])$", re.I)
+_CLOCK_UNIT_MS = {"s": 1000, "m": 60_000, "h": 3_600_000, "d": 86_400_000}
+
+
+def _parse_clock_duration(value):
+    """Accepts a plain number (milliseconds, passed straight to
+    Playwright's own clock.fast_forward()), a friendly "<N><unit>"
+    string (s/m/h/d, e.g. "30d", "90s") converted to milliseconds here
+    since Playwright's own fast_forward() has no such shorthand, or
+    Playwright's own native "HH:MM:SS"/"MM:SS"/"SS" string form,
+    returned unmodified for Playwright itself to parse."""
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value).strip()
+    m = _CLOCK_DURATION_RE.match(text)
+    if m:
+        amount, unit = m.groups()
+        return int(float(amount) * _CLOCK_UNIT_MS[unit.lower()])
+    return text
+
+
 def _run_path(browser, config, path: list[Transition], run: RunResult, credentials: dict):
     """Execute `path` from a fresh, isolated browser context (fresh
     cookies/localStorage -- no leakage between DFS branches). Returns
@@ -339,6 +361,38 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
         ))
         return None
     page = context.new_page()
+    # config["mock_clock"] (Sep 2026): two INDEPENDENT Playwright Clock
+    # API mechanisms, not one unified "just skip forward" behavior --
+    # verified live, not assumed, that they don't substitute for each
+    # other. "start_at" (-> clock.install(time=...), before the page
+    # ever loads) answers a Date.now()/new Date() comparison against an
+    # absolute deadline ("available starting <date>"), checked
+    # synchronously at load -- confirmed live that fast_forward() alone,
+    # called AFTER that same load, does nothing for it, since the check
+    # already ran against the ORIGINAL time. "fast_forward" (applied
+    # once, right after the page's own initial load below) answers a
+    # setTimeout/setInterval-scheduled cooldown ("resend code in 00:30")
+    # -- confirmed live that setting "start_at" alone, with no
+    # fast_forward, does nothing for it either, since a timer scheduled
+    # at load always waits its own full duration from that moment,
+    # regardless of what date it thinks it is. Real sites can use
+    # either pattern (or both); this doesn't guess which, it exposes
+    # both documented primitives and lets the operator pick. Neither
+    # touches server-side time-gating (a real timestamp checked in the
+    # app's own backend) -- genuinely unreachable from outside the
+    # browser, not something any client-side mechanism can address.
+    mock_clock = config.get("mock_clock")
+    if mock_clock:
+        try:
+            start_at = mock_clock.get("start_at")
+            page.clock.install(time=start_at) if start_at else page.clock.install()
+        except Exception as exc:
+            run.checkpoints.append(Checkpoint(
+                kind="error", flow_id=None, state_fp=path[0].from_fp if path else None,
+                message="Could not install the configured mock_clock",
+                detail=str(exc)[:1200],
+            ))
+            return None
     last_fill_summary = None
     last_choice_state: dict = {}
     last_response_status: int | None = None
@@ -372,6 +426,16 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
             ))
             return None
         page.wait_for_timeout(200)
+        if mock_clock and mock_clock.get("fast_forward"):
+            try:
+                page.clock.fast_forward(_parse_clock_duration(mock_clock["fast_forward"]))
+            except Exception as exc:
+                run.checkpoints.append(Checkpoint(
+                    kind="error", flow_id=None, state_fp=path[0].from_fp if path else None,
+                    message="Could not fast-forward the configured mock_clock",
+                    detail=str(exc)[:1200],
+                ))
+                return None
         for i, t in enumerate(path):
             el_meta = json.loads(t.replay_meta)
             try:
