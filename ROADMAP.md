@@ -5119,3 +5119,88 @@ doesn't fit that pattern. Operator's call at the time: plan the
 design but defer the actual implementation to a later session over
 a token-budget constraint -- resolved once that constraint lifted,
 above.
+
+## Candidate priority for repeated global nav (done, Sep 2026)
+
+Picked as the first, highest-leverage item off the prioritized backlog
+(nav-dedup > ARIA choice support > pairwise combinatorial testing >
+embeddings verification > mobile port) -- this affects nearly every
+real site with a persistent header/footer, not a narrow edge case,
+closing the "Candidate priority still starves page-unique content
+behind repeated header nav" item logged back in the Aug 2026 Site B
+section (see this file's own M0 entry) as "worth doing before relying
+on FlowScout for... nearly all of them".
+
+**The gap, precisely:** `_order_for()`'s existing `revisit_history`
+mechanism already deprioritizes a signature ONCE it's been confirmed,
+from ANYWHERE, to lead to an already-known state -- but it can only
+ever help with candidates that actually CONVERGE. A structurally
+identical piece of chrome that produces a technically "new" state on
+every single occurrence (the ROADMAP's own example: a language
+switcher, which changes the CURRENT page's own state rather than
+navigating to one fixed target) is invisible to that mechanism no
+matter how many times it's explored -- `revisit_history` has nothing
+to key off, since every occurrence genuinely differs.
+
+**Fix (`_ubiquitous_nav_signatures()` + `_order_for()` in
+`crawler.py`):** a new, SEPARATE signal, orthogonal to
+`revisit_history` -- a candidate's signature counts as "ubiquitous"
+(structural chrome, not page content) once it's present on
+`max(3, 80%)` of the OTHER already-discovered states, recomputed fresh
+from `run.states` on every `_order_for()` call rather than maintained
+as an incremental counter, so it works identically for every caller
+(crawl's own DFS, `resume_flow`, `explore_combination`, a handoff
+step) without each one remembering to update a separate running tally.
+`_order_for()`'s sort key became a 2-tuple `(revisit, ubiquitous)` --
+a confirmed dead end still sorts to the very back regardless of
+ubiquity, but among candidates NOT yet confirmed as dead ends,
+page-unique ones are now tried before merely-ubiquitous ones. Deliberately
+a STRUCTURAL signal ("this exact signature shows up almost everywhere"),
+not a label-based guess ("this looks like navigation") -- the same
+discipline `field_detect.py`'s login-trigger matching and
+`revisit_history` itself were already held to. Needs at least 3 OTHER
+states before saying anything, so the first few pages of any crawl are
+never penalized for looking similar by coincidence.
+
+**Verified live, and only accepted once the test itself was correct --
+two fixture-modeling bugs caught and fixed along the way, not glossed
+over:**
+1. First attempt used numeric wizard steps (`/wizard/1`, `/wizard/2`...)
+   -- `normalize_url()` deliberately collapses purely-numeric path
+   segments to `*` for stable fingerprinting (the same mechanism the
+   handoff feature's own `raw_url` bug ran into, above), so every step
+   collapsed into the exact same state regardless of which one was
+   actually reached. Fixed by using non-numeric step names.
+2. Second attempt gave every "Next" link an identical `data-test`,
+   which hit `max_action_repeat` (an existing, unrelated cap on how many
+   times one normalized action can repeat in a single path) before
+   candidate ordering was ever consulted -- realistic (a real wizard's
+   own button never changes label step to step) but orthogonal to what
+   was being tested, so the test config raises it rather than the
+   fixture being wrong.
+
+**The actual before/after, same fixture, same config, only the new
+signal toggled (monkeypatched to return an empty set for "before"):**
+a header of 5 static nav links (Home/About/Services/Contact/Blog --
+these DO converge, and were already handled by `revisit_history`) plus
+3 "language switcher" links whose destination is always
+`<current-page>-<lang>` (same signature everywhere, but a genuinely
+new, never-converging state every time -- deliberately isolating the
+NEW mechanism from the existing one) sit in front of a 4-step wizard's
+own "Next" link, `max_breadth_per_state=3`:
+```
+WITHOUT the fix: States=8  Flows=24  -- never even reaches the wizard
+  entry point ("Start wizard" itself starved on /blog, the header's
+  own last static destination)
+WITH the fix:    States=18 Flows=54  -- reaches /wizard/done, full
+  4-step chain traversed
+```
+Regression check: a full saucedemo.com crawl is unchanged in shape --
+19 states, 59 flows (9 unique / 44 duplicate / 6 blocked), 0
+checkpoints, identical to the pre-fix baseline -- saucedemo's own
+header/footer isn't large or repetitive enough to have ever triggered
+starvation, so the fix is a genuine no-op there, exactly as expected
+for a purely additive ordering change.
+
+All 20 existing tests still pass; the nav-dedup fixture and its port
+confirmed shut down; no leftover Playwright/headless-Chromium processes.

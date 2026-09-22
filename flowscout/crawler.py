@@ -26,6 +26,7 @@ import re
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
+from collections import Counter
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from urllib.parse import urlsplit
@@ -482,6 +483,45 @@ def _run_path(browser, config, path: list[Transition], run: RunResult, credentia
         context.close()
 
 
+def _ubiquitous_nav_signatures(node: StateNode, run: RunResult) -> set[str]:
+    """Signatures that look like global chrome (a header/footer nav
+    repeated identically on every page) rather than this page's own
+    content -- see ROADMAP.md's "Candidate priority still starves
+    page-unique content behind repeated header nav" entry (Aug 2026):
+    a site's header (logo + nav links + language switchers) appears on
+    every state and, being earlier in the DOM, fills the whole
+    max_breadth_per_state budget before a page's own primary element
+    ever gets a turn.
+
+    Recomputed fresh from `run.states` on every call (cheap relative to
+    a page load -- states/candidates per run are small) rather than
+    maintained as an incremental counter, so it stays correct for every
+    caller (crawl's own DFS, resume_flow, explore_combination, a
+    handoff step) without each one remembering to update a separate
+    running tally.
+
+    Needs a real sample before it says anything: fewer than 3 OTHER
+    already-discovered states (this node itself excluded -- otherwise
+    every one of its own signatures trivially "appears on a state",
+    itself) returns empty, so the first few pages of any crawl are
+    never penalized for looking similar by coincidence. A signature
+    counts as ubiquitous once it's present on at least
+    max(3, 80% of those other states) -- a high bar on purpose: this
+    is a structural signal ("this exact same nav item shows up nearly
+    everywhere"), not a guess about *which* labels look like navigation
+    (a language-dependent heuristic this project has avoided
+    elsewhere, e.g. field_detect.py's login-trigger matching)."""
+    others = [st for st in run.states.values() if st.fingerprint != node.fingerprint]
+    if len(others) < 3:
+        return set()
+    counts: Counter = Counter()
+    for st in others:
+        for sig in {c.norm_signature for c in st.candidates}:
+            counts[sig] += 1
+    threshold = max(3, round(0.8 * len(others)))
+    return {sig for sig, n in counts.items() if n >= threshold}
+
+
 def _order_for(node: StateNode, max_breadth: int, run: RunResult, revisit_history: set[str],
                 excursion_max_breadth: int | None = None) -> list[int]:
     """`excursion_max_breadth` (Sep 2026): when `node.external_domain`
@@ -527,7 +567,17 @@ def _order_for(node: StateNode, max_breadth: int, run: RunResult, revisit_histor
     realistic default breadth=10, the exact regression the is_choice
     mechanism exists to prevent elsewhere (gap_analysis.py, shared_steps.
     py, testcase_draft.py all already special-case it for the same
-    reason -- this file just hadn't caught up yet)."""
+    reason -- this file just hadn't caught up yet).
+
+    Global-nav deprioritization (Sep 2026, see
+    _ubiquitous_nav_signatures's own docstring): a SECONDARY sort key,
+    weaker than a confirmed revisit_history dead end -- a signature
+    that's both a confirmed dead end AND ubiquitous still sorts to the
+    very back, but page-unique candidates are tried before merely-
+    ubiquitous ones even when neither has been confirmed a dead end
+    yet. Also exempt for is_choice candidates, same reasoning as
+    revisit_history above: a choice control's own options are never
+    global chrome."""
     idxs = list(range(len(node.candidates)))
     effective_breadth = max_breadth
     if node.external_domain and excursion_max_breadth is not None:
@@ -543,7 +593,11 @@ def _order_for(node: StateNode, max_breadth: int, run: RunResult, revisit_histor
                 })
         idxs = eligible
         effective_breadth = excursion_max_breadth
-    idxs.sort(key=lambda i: not node.candidates[i].is_choice and node.candidates[i].norm_signature in revisit_history)
+    nav_signatures = _ubiquitous_nav_signatures(node, run)
+    idxs.sort(key=lambda i: (
+        not node.candidates[i].is_choice and node.candidates[i].norm_signature in revisit_history,
+        not node.candidates[i].is_choice and node.candidates[i].norm_signature in nav_signatures,
+    ))
     if len(idxs) > effective_breadth:
         overflow = idxs[effective_breadth:]
         for i in overflow:
