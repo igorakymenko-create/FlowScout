@@ -68,7 +68,12 @@ verify quickly — it doesn't replace knowing what to point it at.
   *together* can gate content no single-action DFS pass will ever
   reach (see `ROADMAP.md`'s "conjunctive multi-parameter gating"
   entry) — pick the values, and exploration continues automatically
-  from whatever that combination reveals.
+  from whatever that combination reveals. Or skip picking by hand
+  entirely: **"Test all pairwise combinations"** generates and runs a
+  covering set automatically (every *pair* of values across every pair
+  of parameters, not the full cross-product — 11 combinations instead
+  of 81 on a real 4-parameter test case), the standard technique for
+  catching most real interaction bugs without exponential cost.
 - **Seeds additional entry points** the DFS can't click its way to on
   its own: a `sitemap.xml` URL (fetched and parsed automatically,
   including a sitemap index of child sitemaps) and/or an explicit list

@@ -32,6 +32,7 @@ from fnmatch import fnmatch
 from urllib.parse import urlsplit
 
 from .actions import discover_candidates, perform_action, current_domain, describe_action, _wait_for_render
+from .combinatorics import generate_pairwise_combinations
 from .fingerprint import normalize_url, state_fingerprint
 from .models import (
     Checkpoint, ElementCandidate, Flow, FlowStatus, Risk, RunResult, StateNode, Transition,
@@ -1403,6 +1404,135 @@ def _path_to_state(run: RunResult, state_fp: str) -> list[Transition]:
                       f"-- this would be a data inconsistency, not a normal error")
 
 
+def _apply_one_combination(browser, run: RunResult, config: dict, credentials: dict, persona_name: str,
+                            path_to_state: list[Transition], state_fp: str, node: "StateNode",
+                            candidate_indices: list[int], next_flow_id: list[int],
+                            seq_to_flow_id: dict[tuple, int], revisit_history: set[str],
+                            max_depth: int, max_breadth: int, max_states: int, max_flows: int,
+                            max_action_repeat: int, allow_mutating: bool, excursion_max_breadth: int,
+                            combo_note: str, origin_note: str) -> str:
+    """The actual body of applying ONE candidate combination and
+    continuing DFS from wherever it lands -- extracted from
+    explore_combination() (Sep 2026) so explore_combinations_pairwise()
+    can call this in a loop, inside ONE shared browser/Playwright
+    session and with semantic dedup run ONCE at the very end, instead
+    of paying the launch-a-browser-and-call-an-embeddings-API cost once
+    per generated combination (a pairwise plan can easily be 10-20+
+    combinations -- see combinatorics.py's own numbers -- and this
+    project has already hit real embeddings rate limits from far fewer
+    calls than that, see ROADMAP.md's Gemini batching entry).
+
+    Returns a short outcome tag ('new' / 'revisit' / 'blocked') for the
+    caller's own per-combination reporting -- explore_combination()
+    itself doesn't need this (it reports via the run-level delta
+    instead) but explore_combinations_pairwise() wants to say which
+    combinations actually found something new, not just a final total.
+    Every other behavior (safety checks, which state/flow gets
+    recorded, when DFS continues) is byte-for-byte identical to what
+    explore_combination() did inline before this was extracted."""
+    combo_path = list(path_to_state)
+    for idx in candidate_indices:
+        if idx < 0 or idx >= len(node.candidates):
+            raise ValueError(f"candidate index {idx} out of range for state {state_fp}")
+        candidate = node.candidates[idx]
+        if candidate.risk == Risk.DESTRUCTIVE:
+            raise ValueError(f"candidate '{candidate.label}' is destructive -- never walked, "
+                              f"in a combination or otherwise")
+        if candidate.risk == Risk.MUTATING and not allow_mutating:
+            raise ValueError(f"candidate '{candidate.label}' is mutating and allow_mutating is false")
+        el_meta = json.loads(candidate.selector)
+        trial = Transition(from_fp=state_fp, to_fp=None, action_label=describe_action(el_meta, None),
+                            action_norm_signature=candidate.norm_signature, risk=candidate.risk,
+                            risk_reason=candidate.risk_reason, replay_meta=candidate.selector,
+                            is_choice=candidate.is_choice,
+                            anchor_target_missing=candidate.anchor_target_missing)
+        combo_path.append(trial)
+
+    result = _run_path(browser, config, combo_path, run, credentials)
+    if result is None:
+        raise RuntimeError("the combination failed to apply -- see this run's checkpoints for which step and why")
+    (new_fp, url_pat, raw_url, title, new_candidates, fill_summary, new_unclassified, new_disabled,
+     choice_state, response_status, dialog_message, opened_new_page, validation_errors,
+     captcha_detected, external_domain) = result
+
+    last = combo_path[-1]
+    label_fields = {**(fill_summary or {}), **(choice_state or {})}
+    last.action_label = describe_action(json.loads(last.replay_meta), label_fields or None)
+    if fill_summary:
+        last.form_fields = list(fill_summary.keys())
+    last.to_fp = new_fp
+    last.response_status = response_status
+    last.dialog_message = dialog_message
+    last.opened_new_page = opened_new_page
+    last.validation_errors = validation_errors
+    last.captcha_detected = captcha_detected
+
+    if new_fp in run.states and not captcha_detected:
+        last.outcome = "revisit"
+        flow = Flow(
+            id=next_flow_id[0], status=FlowStatus.UNIQUE, duplicate_of=None,
+            dedup_reason=f"{combo_note} -- reached an already-known state",
+            transitions=combo_path, end_state_fp=new_fp, persona=persona_name,
+            origin_note=origin_note,
+        )
+        run.flows.append(flow)
+        return "revisit"
+
+    if captcha_detected:
+        last.outcome = "blocked"
+        if new_fp not in run.states:
+            run.states[new_fp] = StateNode(
+                fingerprint=new_fp, url_pattern=url_pat, raw_url=raw_url, title=title,
+                candidates=new_candidates, discovered_by_flow=next_flow_id[0],
+                unclassified_interactive=new_unclassified, disabled_interactive=new_disabled,
+                captcha_detected=captcha_detected, external_domain=external_domain,
+            )
+        flow = Flow(
+            id=next_flow_id[0], status=FlowStatus.BLOCKED, duplicate_of=None,
+            dedup_reason=f"Blocked by a CAPTCHA/challenge page ({captcha_detected}) -- never explored further",
+            transitions=combo_path, end_state_fp=new_fp, persona=persona_name,
+            origin_note=origin_note,
+        )
+        run.flows.append(flow)
+        next_flow_id[0] += 1
+        return "blocked"
+
+    last.outcome = "ok"
+    new_node = StateNode(
+        fingerprint=new_fp, url_pattern=url_pat, raw_url=raw_url, title=title,
+        candidates=new_candidates, discovered_by_flow=next_flow_id[0],
+        unclassified_interactive=new_unclassified, disabled_interactive=new_disabled,
+        external_domain=external_domain,
+    )
+    run.states[new_fp] = new_node
+    flow = Flow(
+        id=next_flow_id[0], status=FlowStatus.UNIQUE, duplicate_of=None,
+        dedup_reason=f"{combo_note} -- newly discovered state",
+        transitions=combo_path, end_state_fp=new_fp, persona=persona_name,
+        origin_note=origin_note,
+    )
+    run.flows.append(flow)
+    next_flow_id[0] += 1
+
+    frame = _Frame(fp=new_fp, path=combo_path)
+    for t in reversed(combo_path):
+        st = run.states.get(t.to_fp)
+        if st and st.external_domain:
+            frame.excursion_depth += 1
+        else:
+            break
+    frame.order = _order_for(new_node, max_breadth, run, revisit_history, excursion_max_breadth)
+    stack: list[_Frame] = [frame]
+    states_before = len(run.states) - 1
+    flows_before = len(run.flows) - 1
+
+    _run_dfs(browser, config, run, credentials, persona_name, stack, next_flow_id,
+             max_depth, max_breadth, max_states, max_flows, max_action_repeat, allow_mutating,
+             states_before, flows_before, False, seq_to_flow_id, revisit_history,
+             origin_note=origin_note)
+    return "new"
+
+
 def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[int],
                          limit_overrides: dict, credentials: dict, persona_name: str = "default") -> None:
     """Apply several is_choice candidates from ONE already-known state
@@ -1464,28 +1594,6 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
     # resume_flow()'s own identical line.
     config = {**run.config, "limits": limits, "allow_mutating": allow_mutating}
 
-    combo_path = list(path_to_state)
-    for idx in candidate_indices:
-        if idx < 0 or idx >= len(node.candidates):
-            raise ValueError(f"candidate index {idx} out of range for state {state_fp}")
-        candidate = node.candidates[idx]
-        # Same safety invariant normal DFS enforces before ever clicking
-        # anything (see this module's own top-of-file docstring) -- a
-        # human picking a combination through the UI doesn't get to
-        # silently bypass it.
-        if candidate.risk == Risk.DESTRUCTIVE:
-            raise ValueError(f"candidate '{candidate.label}' is destructive -- never walked, "
-                              f"in a combination or otherwise")
-        if candidate.risk == Risk.MUTATING and not allow_mutating:
-            raise ValueError(f"candidate '{candidate.label}' is mutating and allow_mutating is false")
-        el_meta = json.loads(candidate.selector)
-        trial = Transition(from_fp=state_fp, to_fp=None, action_label=describe_action(el_meta, None),
-                            action_norm_signature=candidate.norm_signature, risk=candidate.risk,
-                            risk_reason=candidate.risk_reason, replay_meta=candidate.selector,
-                            is_choice=candidate.is_choice,
-                            anchor_target_missing=candidate.anchor_target_missing)
-        combo_path.append(trial)
-
     next_flow_id = [max((f.id for f in run.flows), default=0) + 1]
     # Fresh, not pre-populated from run.flows -- same convention
     # resume_flow() already uses for its own seq_to_flow_id/
@@ -1497,106 +1605,12 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         try:
-            result = _run_path(browser, config, combo_path, run, credentials)
-            if result is None:
-                raise RuntimeError("the combination failed to apply -- see this run's checkpoints "
-                                    "for which step and why")
-            (new_fp, url_pat, raw_url, title, new_candidates, fill_summary, new_unclassified, new_disabled,
-             choice_state, response_status, dialog_message, opened_new_page, validation_errors,
-             captcha_detected, external_domain) = result
-
-            last = combo_path[-1]
-            label_fields = {**(fill_summary or {}), **(choice_state or {})}
-            last.action_label = describe_action(json.loads(last.replay_meta), label_fields or None)
-            if fill_summary:
-                last.form_fields = list(fill_summary.keys())
-            last.to_fp = new_fp
-            last.response_status = response_status
-            last.dialog_message = dialog_message
-            last.opened_new_page = opened_new_page
-            last.validation_errors = validation_errors
-            last.captcha_detected = captcha_detected
-
-            combo_note = "Set via a user-specified parameter combination"
-            if new_fp in run.states and not captcha_detected:
-                last.outcome = "revisit"
-                flow = Flow(
-                    id=next_flow_id[0], status=FlowStatus.UNIQUE, duplicate_of=None,
-                    dedup_reason="User-specified parameter combination -- reached an already-known state",
-                    transitions=combo_path, end_state_fp=new_fp, persona=persona_name,
-                    origin_note=combo_note,
-                )
-                run.flows.append(flow)
-            elif captcha_detected:
-                # Checked BEFORE the plain "already-known state" branch
-                # above, not only in an else -- captcha_detected here is
-                # _discover_state()'s own fresh re-check for THIS combo,
-                # so it's just as reliable whether new_fp turns out to be
-                # brand new or a state some earlier path already reached
-                # (found live: without this ordering, a combination
-                # landing on an ALREADY-discovered captcha page read as
-                # an unremarkable revisit instead of blocked). Records
-                # the state as evidence if it's genuinely new, emits a
-                # BLOCKED flow naming why, never pushes a frame to
-                # explore a challenge page's own incidental candidates.
-                last.outcome = "blocked"
-                if new_fp not in run.states:
-                    run.states[new_fp] = StateNode(
-                        fingerprint=new_fp, url_pattern=url_pat, raw_url=raw_url, title=title,
-                        candidates=new_candidates, discovered_by_flow=next_flow_id[0],
-                        unclassified_interactive=new_unclassified, disabled_interactive=new_disabled,
-                        captcha_detected=captcha_detected, external_domain=external_domain,
-                    )
-                flow = Flow(
-                    id=next_flow_id[0], status=FlowStatus.BLOCKED, duplicate_of=None,
-                    dedup_reason=f"Blocked by a CAPTCHA/challenge page ({captcha_detected}) "
-                                 f"-- never explored further",
-                    transitions=combo_path, end_state_fp=new_fp, persona=persona_name,
-                    origin_note=combo_note,
-                )
-                run.flows.append(flow)
-                next_flow_id[0] += 1
-            else:
-                last.outcome = "ok"
-                new_node = StateNode(
-                    fingerprint=new_fp, url_pattern=url_pat, raw_url=raw_url, title=title,
-                    candidates=new_candidates, discovered_by_flow=next_flow_id[0],
-                    unclassified_interactive=new_unclassified, disabled_interactive=new_disabled,
-                    external_domain=external_domain,
-                )
-                run.states[new_fp] = new_node
-                flow = Flow(
-                    id=next_flow_id[0], status=FlowStatus.UNIQUE, duplicate_of=None,
-                    dedup_reason="User-specified parameter combination -- newly discovered state",
-                    transitions=combo_path, end_state_fp=new_fp, persona=persona_name,
-                    origin_note=combo_note,
-                )
-                run.flows.append(flow)
-                next_flow_id[0] += 1
-
-                # The combination's own state/flow are a free seed, not
-                # counted against the budget _run_dfs spends exploring
-                # WHATEVER ELSE this unlocked -- same "own full budget"
-                # reasoning as resume_flow()'s states_before/flows_before.
-                frame = _Frame(fp=new_fp, path=combo_path)
-                # Same reconstruction as resume_flow()'s own -- combo_path
-                # already includes path_to_state, which could itself end
-                # mid-excursion.
-                for t in reversed(combo_path):
-                    st = run.states.get(t.to_fp)
-                    if st and st.external_domain:
-                        frame.excursion_depth += 1
-                    else:
-                        break
-                frame.order = _order_for(new_node, max_breadth, run, revisit_history, excursion_max_breadth)
-                stack: list[_Frame] = [frame]
-                states_before = len(run.states) - 1
-                flows_before = len(run.flows) - 1
-
-                _run_dfs(browser, config, run, credentials, persona_name, stack, next_flow_id,
-                         max_depth, max_breadth, max_states, max_flows, max_action_repeat, allow_mutating,
-                         states_before, flows_before, False, seq_to_flow_id, revisit_history,
-                         origin_note="Continued after testing a parameter combination")
+            _apply_one_combination(
+                browser, run, config, credentials, persona_name, path_to_state, state_fp, node,
+                candidate_indices, next_flow_id, seq_to_flow_id, revisit_history,
+                max_depth, max_breadth, max_states, max_flows, max_action_repeat, allow_mutating,
+                excursion_max_breadth, combo_note="Set via a user-specified parameter combination",
+                origin_note="Continued after testing a parameter combination")
         finally:
             browser.close()
 
@@ -1606,6 +1620,124 @@ def explore_combination(run: RunResult, state_fp: str, candidate_indices: list[i
             apply_semantic_dedup(run, threshold=sem_cfg.get("threshold", DEFAULT_THRESHOLD))
         except Exception as exc:  # never let a dedup-pass bug take down an otherwise-successful combination
             run.semantic_dedup_status = f"error on combination: {exc}"
+
+
+def explore_combinations_pairwise(run: RunResult, state_fp: str, limit_overrides: dict,
+                                   credentials: dict, persona_name: str = "default") -> dict:
+    """Automated answer to ROADMAP.md's "Known limitation -- conjunctive
+    multi-parameter gating is invisible to DFS" entry, one level up from
+    explore_combination(): instead of a human hand-picking ONE
+    combination at a time, this finds EVERY distinct is_choice group at
+    `state_fp` and generates a PAIRWISE covering set of combinations
+    (see combinatorics.py's own docstring) -- covering every pair of
+    values across every pair of groups at least once, catching the
+    large majority of real conjunctive-gating bugs at roughly quadratic
+    cost instead of the exponential cost a full cross-product would
+    need. Not a new exploration mechanism -- every combination is
+    applied via the exact same `_apply_one_combination()` body
+    explore_combination() itself uses, just looped, inside one shared
+    browser session with semantic dedup deferred to the very end
+    (see `_apply_one_combination`'s own docstring for why that matters
+    at this scale).
+
+    `state_fp` must already be in run.states, same requirement as
+    explore_combination() -- this never invents locators, only
+    recombines candidates the crawl already discovered. Raises
+    ValueError if the state has fewer than 2 distinct is_choice groups
+    (nothing to combine) or if the parameter space is too large to
+    cover pairwise at all (see combinatorics.py's own
+    MAX_FULL_FACTORIAL guard).
+
+    Returns a summary dict -- {"groups": [...], "group_sizes": [...],
+    "full_factorial_size": int, "combinations_tried": int, "results":
+    [{"candidate_indices": [...], "outcome": "new"|"revisit"|"blocked"}]}
+    -- so a caller (the web API, a report) can show not just "done" but
+    HOW MUCH was covered and what each specific combination actually
+    found, not just a final aggregate."""
+    node = run.states.get(state_fp)
+    if node is None:
+        raise ValueError(f"state {state_fp} not found in this run")
+
+    groups: dict[str, list[int]] = {}
+    for i, c in enumerate(node.candidates):
+        if c.is_choice and c.choice_group:
+            groups.setdefault(c.choice_group, []).append(i)
+    if len(groups) < 2:
+        raise ValueError(f"state {state_fp} has fewer than 2 distinct choice groups -- nothing to combine")
+
+    # Stable order (sorted group names) so the SAME state always
+    # produces the SAME combination plan across repeated calls --
+    # matches generate_pairwise_combinations()'s own determinism, not
+    # undermined by an unstable dict/set iteration order here.
+    group_names = sorted(groups)
+    group_indices = [groups[name] for name in group_names]
+    group_sizes = [len(idxs) for idxs in group_indices]
+    combos = generate_pairwise_combinations(group_sizes)
+    real_combos = [
+        [group_indices[g][offset] for g, offset in enumerate(combo)]
+        for combo in combos
+    ]
+    full_factorial = 1
+    for s in group_sizes:
+        full_factorial *= s
+
+    path_to_state = _path_to_state(run, state_fp)
+
+    from playwright.sync_api import sync_playwright
+
+    limits = {**run.config.get("limits", {}), **{k: v for k, v in limit_overrides.items() if k != "allow_mutating"}}
+    max_depth = limits["max_depth"]
+    max_breadth = limits["max_breadth_per_state"]
+    max_states = limits["max_states"]
+    max_flows = limits["max_flows"]
+    max_action_repeat = limits.get("max_action_repeat", 2)
+    allow_mutating = limit_overrides.get("allow_mutating", run.config.get("allow_mutating", True))
+    excursion_max_breadth = run.config.get("excursion_max_breadth", 1)
+    config = {**run.config, "limits": limits, "allow_mutating": allow_mutating}
+
+    next_flow_id = [max((f.id for f in run.flows), default=0) + 1]
+    seq_to_flow_id: dict[tuple, int] = {}
+    revisit_history: set[str] = set()
+
+    results = []
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        try:
+            for i, candidate_indices in enumerate(real_combos):
+                try:
+                    outcome = _apply_one_combination(
+                        browser, run, config, credentials, persona_name, path_to_state, state_fp, node,
+                        candidate_indices, next_flow_id, seq_to_flow_id, revisit_history,
+                        max_depth, max_breadth, max_states, max_flows, max_action_repeat, allow_mutating,
+                        excursion_max_breadth,
+                        combo_note=f"Set via an automatic pairwise combination ({i + 1}/{len(real_combos)})",
+                        origin_note="Continued after an automatic pairwise combination")
+                except (ValueError, RuntimeError) as exc:
+                    # A single generated combination failing (e.g. a
+                    # candidate that's since become destructive/mutating-
+                    # withheld, or a genuine replay error) shouldn't
+                    # abandon the rest of the plan -- recorded per-combo,
+                    # same "a partial failure doesn't read as a silent
+                    # whole-batch no-op" discipline resume_all already
+                    # established.
+                    results.append({"candidate_indices": candidate_indices, "outcome": f"error: {exc}"})
+                    continue
+                results.append({"candidate_indices": candidate_indices, "outcome": outcome})
+        finally:
+            browser.close()
+
+    sem_cfg = run.config.get("semantic_dedup", {})
+    if sem_cfg.get("enabled", True):
+        try:
+            apply_semantic_dedup(run, threshold=sem_cfg.get("threshold", DEFAULT_THRESHOLD))
+        except Exception as exc:  # never let a dedup-pass bug take down an otherwise-successful pass
+            run.semantic_dedup_status = f"error on pairwise combinations: {exc}"
+
+    return {
+        "groups": group_names, "group_sizes": group_sizes,
+        "full_factorial_size": full_factorial, "combinations_tried": len(real_combos),
+        "results": results,
+    }
 
 
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")

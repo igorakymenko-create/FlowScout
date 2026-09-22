@@ -340,6 +340,32 @@ async def explore_combination_endpoint(run_id: str, body: dict):
     return {"summary": result["run"].summary(), "delta": result["delta"]}
 
 
+@app.post("/api/runs/{run_id}/explore-combinations-pairwise")
+async def explore_combinations_pairwise_endpoint(run_id: str, body: dict):
+    """Automatically generate and apply a PAIRWISE covering set of
+    combinations across every is_choice group at one already-known
+    state, instead of a human hand-picking one set at a time via
+    /explore-combination above -- see
+    crawler.explore_combinations_pairwise()'s own docstring. `body`:
+    {"state_fp": str, "limits": {...}} -- no candidate_indices; the
+    combination plan is generated automatically from the state's own
+    choice groups."""
+    state_fp = body.get("state_fp")
+    if not state_fp:
+        raise HTTPException(400, "state_fp is required")
+    limit_overrides = body.get("limits") or {}
+    try:
+        result = await asyncio.to_thread(
+            runs_module.explore_combinations_pairwise_in_run, run_id, state_fp, limit_overrides)
+    except FileNotFoundError:
+        raise HTTPException(404, "run not found") from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return {"summary": result["run"].summary(), "delta": result["delta"], "pairwise": result["pairwise"]}
+
+
 @app.get("/api/projects/{project}/state")
 def get_project_state(project: str, variant: str = ""):
     """The durable cross-run record (identity.py + project_state.py) --

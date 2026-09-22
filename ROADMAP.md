@@ -5293,3 +5293,119 @@ tabs, so this is a genuine no-op there).
 All 20 existing tests still pass; the tabs fixture and its port
 confirmed shut down; no leftover Playwright/headless-Chromium
 processes.
+
+## Automated pairwise combination testing (done, Sep 2026)
+
+Third and largest item off the prioritized backlog: the direct
+automation of ROADMAP.md's own "Known limitation -- conjunctive
+multi-parameter gating is invisible to DFS" entry, one level up from
+`explore_combination()` (Aug 2026, still human-guided -- an operator
+picks ONE specific combination through the report's own UI). This
+finds EVERY distinct `is_choice` group at a state and generates a
+PAIRWISE covering set of combinations automatically -- the standard
+real-world technique for this class of problem, covering every PAIR
+of values across every pair of groups at least once instead of the
+full cross-product, catching the large majority of real interaction
+bugs at roughly quadratic cost instead of exponential.
+
+**New, dependency-free module (`flowscout/combinatorics.py`):**
+`generate_pairwise_combinations(sizes: list[int]) -> list[tuple[int,
+...]]` -- pure index arithmetic, no crawler/Playwright knowledge at
+all, deliberately kept independently testable. Greedy, not globally
+optimal (finding the SMALLEST possible covering array is NP-hard) --
+builds one combination at a time, scoring each group's candidate value
+against every OTHER group (whether already fixed earlier in this same
+combination or not: an already-fixed group scores a definite match, a
+not-yet-fixed one scores the count of its own values that could still
+pair with this one), then removes every pair the finished combination
+actually covers (not just the ones the search targeted -- one
+combination covers every pair among its own groups at once) and
+repeats until none remain. `MAX_FULL_FACTORIAL` (100,000) guards
+against a pathological input grinding forever.
+
+**Found live, before the algorithm even worked at all:** the first
+version scored each group's value ONLY against already-fixed EARLIER
+groups. Group 0 (nothing fixed before it) always scored every value
+identically (0, since there's nothing to compare against yet) and
+defaulted to index 0 -- forever. Any pair of values that could only be
+covered by varying group 0 never got covered, and the `while needed:`
+loop never terminated. Caught by the test suite itself hanging past
+its own 2-minute timeout, not by manual inspection. Fixed by scoring
+every group against every OTHER group unconditionally (a not-yet-fixed
+peer scores by how many of ITS OWN possible values could still pair
+with the value being considered), giving every group -- including
+whichever one happens to be processed first -- a real signal to choose
+from.
+
+**Crawler integration, reusing `explore_combination()`'s own machinery
+rather than inventing a parallel mechanism:** its body was extracted
+into `_apply_one_combination()` (applies ONE resolved candidate
+combination, continues DFS from wherever it lands, returns a short
+outcome tag) so the new `explore_combinations_pairwise(run, state_fp,
+limit_overrides, credentials)` can call it in a loop -- inside ONE
+shared Playwright session, with semantic dedup deferred to the very
+end instead of paid once per generated combination. That distinction
+matters at this scale: a pairwise plan can easily be 10-20+
+combinations, and this project has already hit real Gemini rate limits
+from far fewer embeddings calls than that (see this file's own
+batching/retry entry). `explore_combination()` itself is
+behavior-for-behavior unchanged -- regression-verified directly
+against the exact fixture that originally proved the underlying
+limitation (2 checkboxes + 1 select gating a hidden link): still finds
+it, same shape (states 1 -> 3, secret discovered).
+
+**Web layer, mirroring the existing single-combination endpoint
+exactly:** `web/runs.py`'s `explore_combinations_pairwise_in_run()`
+(loads from disk, mutates, writes back, marks any gap analysis stale),
+`web/app.py`'s `POST /api/runs/{run_id}/explore-combinations-pairwise`
+(`{state_fp, limits}` -- no `candidate_indices`, the plan is generated
+automatically), and a new "Test all pairwise combinations (N of M)"
+button in the report's existing combo-box UI, sitting alongside "Test
+this combination" -- the N/M preview computed at report-render time
+(a pure, cheap call into `combinatorics.py`, no browser needed) so an
+operator sees the actual savings ("11 of 81") before committing to a
+run that could take minutes.
+
+**Honest boundary, stated plainly, not implied away:** pairwise
+testing is only ever guaranteed to catch a bug caused by TWO
+parameters interacting badly. A gate that genuinely requires three or
+more specific values set together simultaneously (a true N-way
+interaction, N>2) is NOT guaranteed to be hit by a pairwise-only plan
+-- this is the same honest tradeoff the whole technique makes in
+real-world QA practice (quadratic cost, most-but-not-all bugs caught),
+not something this implementation quietly promises more than it
+delivers.
+
+**Verified live, two fixtures, neither hand-waved:**
+```
+1) The original conjunctive-gating fixture (2 checkboxes + 1 select,
+   sizes [1, 1, 2] -- a checkbox is inherently a size-1 group, its own
+   "click or don't" isn't a second candidate index): full_factorial=2,
+   combinations_tried=2 (can't beat a full cross-product that's
+   already this small), secret feature discovered, states 1 -> 3.
+   Demonstrates the core new capability -- no human specifying the
+   combination -- but not a meaningful reduction, by construction.
+
+2) A 4-select fixture (3 options each, 81 full-factorial) gated on
+   just ONE pair (sel-2='c' AND sel-3='b', sel-1/sel-4 irrelevant) --
+   a genuine 2-way interaction, deliberately not a 4-way-AND-everything
+   gate (see the honest boundary above): full_factorial=81,
+   combinations_tried=11, secret feature discovered, states 1 -> 3.
+   The actual quadratic-vs-exponential claim, with real numbers: 11
+   combinations instead of 81, still finds the real gate.
+```
+Also verified through the full web-layer path against the second
+fixture, not just the crawler primitive: started a real crawl via
+`POST /api/runs`, confirmed the rendered report shows "Test all
+pairwise combinations (11 of 81)", called `POST /api/runs/{id}/
+explore-combinations-pairwise` exactly as the button's own JS does,
+confirmed the response's `pairwise` field lists all 11 combinations
+with their individual outcomes, and confirmed the report re-renders
+with the newly discovered secret state's own flow visible.
+
+13 new unit tests for `combinatorics.py` (pair-coverage completeness
+across 6 different group-size shapes, determinism, the degenerate
+2-group case, the huge-input guard) plus all 20 pre-existing tests
+still pass (33 total). Saucedemo.com crawl regression-checked
+unaffected. All fixtures and their ports confirmed shut down; no
+leftover Playwright/headless-Chromium processes.

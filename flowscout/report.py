@@ -5,6 +5,7 @@ import html
 import json
 from collections import Counter
 
+from .combinatorics import generate_pairwise_combinations
 from .fingerprint import human_page_label
 from .models import ChangeReport, FlowStatus, GapAnalysis, Risk, RunResult
 
@@ -538,6 +539,27 @@ def _combination_box_html(fp: str, node, run_id: str, default_allow_mutating: bo
             options = f'<label><input type="checkbox" class="combo-choice" value="{i}"> {_esc(c.label)}</label>'
         parts.append(f'<div class="combo-group"><span class="combo-group-name">{_esc(group_name)}</span>{options}</div>')
     mutating_checked = "checked" if default_allow_mutating else ""
+    # Preview numbers computed here (report-render time, no browser
+    # needed -- generate_pairwise_combinations() is a pure function
+    # over group sizes) so an operator sees "11 combinations instead of
+    # 81" BEFORE clicking, not after committing to a run that could
+    # take minutes -- see combinatorics.py's own docstring for why
+    # pairwise needs far fewer than the full cross-product.
+    group_sizes = [len(members) for members in groups.values()]
+    full_factorial = 1
+    for s in group_sizes:
+        full_factorial *= s
+    try:
+        pairwise_count = len(generate_pairwise_combinations(group_sizes))
+    except ValueError:
+        pairwise_count = None  # too large to cover pairwise at all -- see MAX_FULL_FACTORIAL
+    pairwise_button = (
+        f'<button type="button" onclick="flowscoutExplorePairwise(\'{_esc(run_id)}\', this)">'
+        f'Test all pairwise combinations ({pairwise_count} of {full_factorial})</button>'
+        if pairwise_count is not None else
+        '<span class="hint" title="Too many parameter combinations to cover pairwise -- narrow the groups.">'
+        'Pairwise combinations: parameter space too large</span>'
+    )
     return f"""
       <div class="combo-box" data-state-fp="{_esc(fp)}">
         {"".join(parts)}
@@ -545,6 +567,7 @@ def _combination_box_html(fp: str, node, run_id: str, default_allow_mutating: bo
           <label>Max depth <input type="number" class="combo-depth" value="8" min="1" style="width:64px"></label>
           <label><input type="checkbox" class="combo-mutating" {mutating_checked}> Allow mutating</label>
           <button type="button" onclick="flowscoutExploreCombination('{_esc(run_id)}', this)">Test this combination</button>
+          {pairwise_button}
           <span class="combo-status"></span>
         </div>
       </div>"""
@@ -871,6 +894,50 @@ async function flowscoutExploreCombination(runId, btn) {
       return;
     }
     statusEl.textContent = `Done — ${flowscoutDeltaText(data.delta)} — reloading…`;
+    await flowscoutSleep(2500);
+    window.location.reload();
+  } catch (e) {
+    statusEl.textContent = 'Failed: ' + e;
+    btn.disabled = false;
+  } finally {
+    clearInterval(timer);
+  }
+}
+
+async function flowscoutExplorePairwise(runId, btn) {
+  const box = btn.closest('.combo-box');
+  const stateFp = box.dataset.stateFp;
+  const depth = Number(box.querySelector('.combo-depth').value);
+  const allowMutating = box.querySelector('.combo-mutating').checked;
+  const statusEl = box.querySelector('.combo-status');
+  btn.disabled = true;
+  // Same elapsed-time ticker as flowscoutExploreCombination above --
+  // this runs SEVERAL combinations in sequence (see the button's own
+  // "N of M" label for how many), each one a full replay-plus-continue,
+  // so the total wait is the sum of all of them, not just one.
+  const startedAt = Date.now();
+  const tick = () => {
+    const secs = Math.round((Date.now() - startedAt) / 1000);
+    statusEl.textContent = `Testing pairwise combinations… (${secs}s elapsed — runs several combinations `
+      + `in sequence, so this can take a while)`;
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
+  try {
+    const res = await fetch(`/api/runs/${runId}/explore-combinations-pairwise`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({state_fp: stateFp, limits: {max_depth: depth, allow_mutating: allowMutating}}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      statusEl.textContent = 'Failed: ' + (data.detail || res.statusText);
+      btn.disabled = false;
+      return;
+    }
+    const pw = data.pairwise || {};
+    const newCount = (pw.results || []).filter(r => r.outcome === 'new').length;
+    statusEl.textContent = `Done — ${pw.combinations_tried ?? '?'} combination(s) tried `
+      + `(${newCount} found a new state), ${flowscoutDeltaText(data.delta)} — reloading…`;
     await flowscoutSleep(2500);
     window.location.reload();
   } catch (e) {

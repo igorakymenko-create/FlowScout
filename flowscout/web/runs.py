@@ -21,7 +21,7 @@ from typing import Optional
 
 from .. import project_state as project_state_module
 from ..change_detection import detect_changes
-from ..crawler import crawl, explore_combination, resume_flow, run_handoff_scenario
+from ..crawler import crawl, explore_combination, explore_combinations_pairwise, resume_flow, run_handoff_scenario
 from ..gap_analysis import DEFAULT_THRESHOLD, analyze_gaps
 from ..models import ChangeEvent, ChangeReport, GapAnalysis, RunResult
 from ..report import render_html
@@ -500,6 +500,49 @@ def explore_combination_in_run(run_id: str, state_fp: str, candidate_indices: li
     changes = _load_change_report(out_dir)
     (out_dir / "report.html").write_text(render_html(run, gap, changes, run_id=run_id), encoding="utf-8")
     return {"run": run, "delta": delta}
+
+
+def explore_combinations_pairwise_in_run(run_id: str, state_fp: str, limit_overrides: dict) -> dict:
+    """Same shape as explore_combination_in_run() above, but seeds an
+    automatically-generated PAIRWISE covering set of combinations
+    across every is_choice group at `state_fp` instead of one
+    human-chosen set -- see crawler.explore_combinations_pairwise()'s
+    own docstring. Returns {"run", "delta", "pairwise": <the summary
+    dict from explore_combinations_pairwise() itself>} so the caller
+    can report which specific combinations found what, not just an
+    aggregate delta."""
+    out_dir = get_run_dir(run_id)
+    flows_path = out_dir / "flows.json"
+    if not flows_path.exists():
+        raise FileNotFoundError(f"no completed run at {run_id}")
+    run = RunResult.from_json(json.loads(flows_path.read_text(encoding="utf-8")))
+
+    node = run.states.get(state_fp)
+    if node is None:
+        raise ValueError(f"no state {state_fp} in run {run_id}")
+    persona_name = "default"
+    if node.discovered_by_flow is not None:
+        owner = next((f for f in run.flows if f.id == node.discovered_by_flow), None)
+        if owner is not None:
+            persona_name = owner.persona
+
+    before = run.summary()
+    credentials = _credentials_for_persona(run.config, persona_name)
+    pairwise_summary = explore_combinations_pairwise(run, state_fp, limit_overrides, credentials, persona_name)
+    delta = _flow_delta(before, run.summary())
+
+    flows_path.write_text(json.dumps(run.to_json(), indent=2), encoding="utf-8")
+
+    gap: Optional[GapAnalysis] = None
+    gap_path = out_dir / "gap_analysis.json"
+    if gap_path.exists():
+        gap = GapAnalysis.from_json(json.loads(gap_path.read_text(encoding="utf-8")))
+        gap.status += (" (stale: this run was extended by testing pairwise parameter combinations since "
+                        "this gap analysis ran -- re-upload the TCMS to refresh it)")
+
+    changes = _load_change_report(out_dir)
+    (out_dir / "report.html").write_text(render_html(run, gap, changes, run_id=run_id), encoding="utf-8")
+    return {"run": run, "delta": delta, "pairwise": pairwise_summary}
 
 
 def confirm_tcms_link(project: str, identity: str, tcms_id: str, variant: str = "") -> None:
