@@ -5204,3 +5204,92 @@ for a purely additive ordering change.
 
 All 20 existing tests still pass; the nav-dedup fixture and its port
 confirmed shut down; no leftover Playwright/headless-Chromium processes.
+
+## ARIA `role="tab"`/`role="tablist"` as choice candidates (done, Sep 2026)
+
+Second item off the prioritized backlog. `role="checkbox"`/`role="radio"`
+custom controls (Radix/shadcn-style component libraries) were already
+recognized as `is_choice` candidates, grouped by the nearest
+`role="radiogroup"` ancestor -- but `role="tab"`/`role="tablist"` was
+explicitly logged as still unhandled (this file's own "Radio buttons
+and checkboxes as choice candidates" entry). Structurally the same
+gap: a tab switches which panel is visible, exactly like a radio
+option deselects its siblings, but was previously an ordinary,
+ungrouped candidate -- a click on one tab read as an unremarkable "new
+state," and picking a DIFFERENT tab later in the same run wasn't
+recognized as a distinct alternative the way a radio/select pick
+already is.
+
+**Built by mirroring the existing role-radio/role-checkbox shape** (a
+new `[role="tab"]` query in `_DISCOVER_JS`, a `role-tab` branch in
+`_build_candidate`, `describe_action`, and `build_locator`), reusing
+`is_choice=True` + `choice_group` generically -- everything downstream
+(`identity.py`'s anchor-widening, `gap_analysis.py`, `shared_steps.py`,
+`testcase_draft.py`, the report's own choice-group display) already
+keys off those two fields alone, not a tag string, so nothing else
+needed to change for a tablist to get the same treatment select/radio/
+checkbox already have.
+
+**Two real bugs caught by building a live fixture, not by inspecting
+the code and assuming it would work the same as role-radio:**
+1. **Wrong label.** Copied `role-radio`'s own `inputLabelText(el)` for
+   the tab's accessible name at first -- wrong function for the job.
+   `inputLabelText` is built for a form control whose OWN text is
+   typically empty and whose real label lives on a separate, PAIRED
+   `<label>` element (a checkbox/radio's usual shape) -- a tab is the
+   opposite, its accessible name is normally its own visible text
+   ("Plan A"). Found live: the candidate's label came back as the raw
+   `data-test` attribute instead of the tab's real text. Fixed by
+   reading `el.innerText` directly, the same way the generic candidate
+   loop already names a button/link.
+2. **Wrong grouping.** Copied role-radio's own `base` computation
+   (`dataTest || id || roleGroup`) for `choice_group` too -- also
+   wrong: a real tab typically carries its OWN per-tab `data-test`
+   ("tab-a", "tab-b", ...), so `base` came out DIFFERENT for every tab,
+   splitting 3 mutually-exclusive alternatives into 3 separate
+   one-tab "groups" instead of recognizing them as one choice.
+   (`role-radio`'s own version likely shares this same latent
+   assumption -- a radio option WITHOUT its own per-option data-test,
+   relying on the group's own identifier instead -- but that's
+   existing, shipped, previously-verified-live code and untouched
+   here; not implicated by this specific fix.) Fixed by always using
+   `roleGroup` (the tablist's own identifier) as the group, keeping
+   `dataTest`/`id`/accessible-name as a SEPARATE per-tab distinguishing
+   value.
+
+**Verified live** against a 3-tab fixture (`role="tablist"` +
+`role="tab"` + `role="tabpanel"`, each panel showing a genuinely
+different, uniquely-labeled purchase link, so switching tabs produces
+a real, distinct state): all 3 tabs correctly recognized as one
+`is_choice` group sharing `choice_group="pricing-tabs"`, each with its
+own correct label ("Plan A"/"Plan B"/"Plan C"), and the full crawl
+reached all three "Buy Plan X" destinations -- none starved or deduped
+away.
+
+**Disclosed, not fixed here (pre-existing, shared with role-checkbox/
+role-radio, not introduced by this change):** an interactive
+`role="tab"` element with a REAL click listener (a component library's
+own event binding, or a literal `<button role="tab">` matching the
+crawler's generic `a, button, ...` candidate selector directly) also
+gets picked up by the ordinary candidate-discovery path, producing a
+second, redundant candidate for the same physical element under the
+generic `data-test:`/`id:`/`text:` signature scheme alongside the new
+`role-tab-choice:` one -- confirmed live on this fixture's own
+`<div role="tab" onclick=...>`, caught by CDP's handler-discovery pool.
+Not incorrect (both paths click the same element, reaching the same
+state either way), just redundant -- one extra breadth slot spent
+exploring what's effectively the identical action twice under two
+different labels. Fixing it would mean excluding every roleControls-
+matched element from the generic candidates/pool pass entirely, a
+bigger, riskier change touching the already-working role-checkbox/
+role-radio code too -- a separate backlog item if it's ever worth
+doing, not scope-crept into this one.
+
+Regression check: a full saucedemo.com crawl is unchanged in shape --
+19 states, 59 flows (9 unique / 44 duplicate / 6 blocked), 0
+checkpoints, identical to the pre-fix baseline (saucedemo has no ARIA
+tabs, so this is a genuine no-op there).
+
+All 20 existing tests still pass; the tabs fixture and its port
+confirmed shut down; no leftover Playwright/headless-Chromium
+processes.

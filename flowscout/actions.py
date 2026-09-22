@@ -598,6 +598,50 @@ _DISCOVER_JS = r"""
         });
     }
 
+    // role="tab" (inside a role="tablist"): structurally the same
+    // "pick one of N" choice a radio group represents -- selecting a
+    // tab shows its own panel and hides the others, exactly like a
+    // radio option deselects its siblings. Previously invisible to
+    // is_choice entirely (an ordinary, ungrouped candidate), meaning a
+    // click on one tab read as an unremarkable "new state" and picking
+    // a DIFFERENT tab later in the same run wasn't recognized as a
+    // distinct alternative the way a radio/select pick already is (see
+    // identity.py's own anchor-widening for is_choice actions).
+    for (const el of queryAllDeep(document, '[role="tab"]')) {
+        if (el.tagName === 'INPUT') continue;
+        if (!isUsableInput(el)) continue;
+        const selected = el.getAttribute('aria-selected') === 'true';
+        // NOT inputLabelText() -- that's built for a form control whose
+        // own text is typically empty and whose real label lives on a
+        // PAIRED <label> element (a checkbox/radio's usual shape). A tab
+        // is the opposite: its accessible name is normally its OWN visible
+        // text ("Plan A"), same as how the generic candidate loop above
+        // reads a button/link's name. Caught live -- inputLabelText()
+        // found nothing here and silently fell back to the data-test
+        // attribute as the displayed label instead of the real tab text.
+        const name = firstBlockText(el.innerText || '') || el.getAttribute('aria-label')
+            || el.getAttribute('title') || '';
+        const listEl = el.closest('[role="tablist"]');
+        const group = listEl
+            ? (listEl.getAttribute('data-test') || listEl.id || listEl.getAttribute('aria-label') || 'tablist')
+            : `__ungrouped_tab_${roleControls.length}`;
+        roleControls.push({
+            tag: 'role-tab',
+            dataTest: el.getAttribute('data-test') || el.getAttribute('data-testid') || '',
+            id: el.id || '',
+            href: '',
+            text: name,
+            type: 'role-tab-choice',
+            inForm: !!closestFormLike(el),
+            occluded: false, occludedBy: '',
+            className: (el.className || '').toString().slice(0, 120),
+            ariaLabel: el.getAttribute('aria-label') || '',
+            ariaHasPopup: '', ariaExpandedSet: false,
+            ariaControls: '', controlledTag: '', controlledClass: '',
+            roleAccessibleName: name, roleChecked: selected, roleGroup: group,
+        });
+    }
+
     // Validation-error visibility (Sep 2026): state_fingerprint() is
     // built from (url pattern, candidate signatures) alone -- blind to
     // page TEXT entirely. Rejecting an invalid form submission typically
@@ -747,6 +791,9 @@ def describe_action(el_meta: dict, fill_summary: dict | None) -> str:
         return f'Select "{text}" in "{group}"'
     if el_meta.get("tag") == "role-checkbox":
         return f'Toggle "{text}"'
+    if el_meta.get("tag") == "role-tab":
+        group = (el_meta.get("roleGroup") or "").lstrip("_") or "tabs"
+        return f'Select tab "{text}" in "{group}"'
     base = f'Open "{text}"' if el_meta.get("tag") == "a" else f'Click "{text}"'
     kind = classify_menu_kind(el_meta)
     return f"{base} ({kind})" if kind else base
@@ -1028,6 +1075,41 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
             is_choice=True, choice_group=base,
         ), None
 
+    if el.get("tag") == "role-tab":
+        # Deliberately NOT the same "base" computation role-radio/
+        # role-checkbox use above (dataTest/id first, roleGroup as a
+        # last resort) -- caught live: a real tab typically carries its
+        # OWN per-tab data-test ("tab-a", "tab-b", ...), which is common
+        # and reasonable markup, unlike a radio option (where a shared
+        # per-GROUP data-test, or none at all, is the more typical
+        # shape this project has actually been tested against). Using
+        # dataTest-first for `base` there would split every tab into
+        # its OWN one-tab "group", defeating the entire point of
+        # recognizing them as mutually-exclusive alternatives. `group`
+        # (always roleGroup -- the tablist's own identifier) is kept
+        # separate from the per-tab distinguishing value on purpose.
+        group = el["roleGroup"]
+        name = el["roleAccessibleName"]
+        value_key = el["dataTest"] or el["id"] or name
+        if not value_key:
+            return None, {
+                "label": describe_action(el, None),
+                "reason": "no reliable locator for this tab (no data-test/id/accessible name) "
+                          "-- skipped rather than risk clicking the wrong element",
+            }
+        signature = f"role-tab-choice:{group}:{value_key}"
+        if signature in seen:
+            return None, None
+        seen.add(signature)
+        label = name or el["dataTest"] or el["id"] or "tab"
+        norm_signature = normalize_signature(f"choice-{group}-{value_key}")
+        risk, reason = classify(label, None, current_domain, allowed_domains, exclude_patterns, excursion_domains)
+        return ElementCandidate(
+            signature=signature, norm_signature=norm_signature, label=label,
+            selector=json.dumps(el), risk=risk, risk_reason=reason, discovered_via=via,
+            is_choice=True, choice_group=group,
+        ), None
+
     sig_key = el["dataTest"] or el["id"] or f"{el['tag']}:{el['text']}"
     signature = f"data-test:{sig_key}" if el["dataTest"] else (
         f"id:{sig_key}" if el["id"] else f"text:{sig_key}"
@@ -1238,7 +1320,7 @@ def build_locator(page, el_meta: dict):
         return scope.locator(
             f'input[type="checkbox"][name="{el_meta["checkboxName"]}"][value="{el_meta["checkboxValue"]}"]'
         ).first
-    if el_meta.get("tag") in ("role-checkbox", "role-radio"):
+    if el_meta.get("tag") in ("role-checkbox", "role-radio", "role-tab"):
         # No data-test/id (handled above already) -- fall back to
         # Playwright's own accessible-name resolution via get_by_role(),
         # the same mechanism that actually located this element
@@ -1247,7 +1329,7 @@ def build_locator(page, el_meta: dict):
         # to its own sibling <label> either -- verified live: get_by_role
         # found it anyway, and a subsequent .click() correctly toggled
         # its aria-checked/data-state, which raw CSS never could have).
-        role = "checkbox" if el_meta["tag"] == "role-checkbox" else "radio"
+        role = {"role-checkbox": "checkbox", "role-radio": "radio", "role-tab": "tab"}[el_meta["tag"]]
         name = el_meta.get("roleAccessibleName") or el_meta.get("text") or ""
         return scope.get_by_role(role, name=name, exact=True).first
     if el_meta.get("href"):
@@ -1329,7 +1411,7 @@ def fill_enclosing_form(page, el_meta: dict, credentials: dict) -> dict | None:
     """
     if not el_meta.get("inForm") or el_meta.get("type") in (
             "select-option", "radio-choice", "checkbox-toggle",
-            "role-radio-choice", "role-checkbox-toggle"):
+            "role-radio-choice", "role-checkbox-toggle", "role-tab-choice"):
         return None
     container = _closest_form_like_handle(page, el_meta)
     if container is None:
