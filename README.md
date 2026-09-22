@@ -96,8 +96,9 @@ verify quickly — it doesn't replace knowing what to point it at.
   so both are exposed rather than guessing which one a given site
   needs. Only ever touches client-side JavaScript timing — a real
   server-side timestamp check is unreachable from outside the browser.
-- **Runs scripted multi-actor scenarios** (`flowscout handoff`) for
-  workflows no single autonomous persona can complete alone — an admin
+- **Runs scripted multi-actor scenarios** (`flowscout handoff`, or the
+  step-by-step builder in the local UI) for workflows no single
+  autonomous persona can complete alone — an admin
   approving a request a different, ordinary user just submitted, then
   that SAME user (same live session, not just the same persona name)
   continuing on into whatever the approval unlocked. Each step names

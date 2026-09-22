@@ -21,7 +21,7 @@ from typing import Optional
 
 from .. import project_state as project_state_module
 from ..change_detection import detect_changes
-from ..crawler import crawl, explore_combination, resume_flow
+from ..crawler import crawl, explore_combination, resume_flow, run_handoff_scenario
 from ..gap_analysis import DEFAULT_THRESHOLD, analyze_gaps
 from ..models import ChangeEvent, ChangeReport, GapAnalysis, RunResult
 from ..report import render_html
@@ -79,7 +79,12 @@ def _execute(run_id: str, config: dict, tcms_path: Optional[str] = None,
     handle = _runs[run_id]
     out_dir = RUNS_DIR / run_id
     try:
-        run = crawl(config)
+        # A "handoff" config runs the scripted multi-actor orchestrator
+        # instead of the ordinary autonomous crawl -- see
+        # run_handoff_scenario()'s own docstring. Everything downstream
+        # (to_json, gap analysis, change detection, project_state,
+        # report rendering) treats the RunResult identically either way.
+        run = run_handoff_scenario(config) if config.get("handoff") else crawl(config)
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "flows.json").write_text(json.dumps(run.to_json(), indent=2), encoding="utf-8")
 

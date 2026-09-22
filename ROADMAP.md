@@ -5069,13 +5069,53 @@ All 20 existing tests still pass; the handoff fixture server and its
 port confirmed shut down; no leftover Playwright/headless-Chromium
 processes.
 
-**Not yet built: a dedicated web-UI editor for handoff configs.**
-Every other config knob added this session (`storage_state`,
-`variant`, `excursion_domains`, `mock_clock`) is a flat key the
-existing form-based UI already handles; `"handoff"` is a nested,
-ordered list of steps (persona/seed_url/find/action/capture/
-capture_session/explore) that doesn't fit that pattern. Operator's
-call: plan the design (a dedicated per-step form, matching the rest
-of the UI's own style, rather than a raw-JSON textarea shortcut) but
-defer the actual implementation to a later session. For now,
-`flowscout handoff --config ...` (CLI) is the only way to run one.
+**Web-UI editor for handoff configs (done, Sep 2026).** Originally
+deferred (see below) since every other config knob added this session
+(`storage_state`, `variant`, `excursion_domains`, `mock_clock`) is a
+flat key the existing form-based UI already handles, while
+`"handoff"` is a nested, ordered list of steps that doesn't fit that
+pattern -- built once the deferral's own reason (token budget) no
+longer applied. A dedicated per-step form (`+ add step`, matching the
+rest of the UI's own style, not a raw-JSON textarea shortcut): each
+step block has a persona name, a Direct-URL/Find mode toggle with the
+matching fields shown/hidden accordingly, and optional storage-state-
+resume / action / capture / capture-session / explore fields, exactly
+mirroring `run_handoff_scenario()`'s own JSON shape field-for-field.
+`collectConfig()` only emits `config.handoff` when at least one step
+block exists, so an ordinary crawl's payload is byte-for-byte
+unchanged from before this existed. The backend (`web/runs.py`'s
+`_execute`) dispatches to `run_handoff_scenario(config)` instead of
+`crawl(config)` purely based on `config.get("handoff")` being
+truthy -- everything downstream (gap analysis, change detection,
+project state, report rendering) is identical either way, since both
+functions return the same `RunResult` shape.
+
+Verified live, through the real running server (not just reading the
+code): a Playwright-driven browser session against `flowscout serve`
+(1) filled Project/Start URL/Allowed domains, confirmed the submit
+button reads "Start crawl"; (2) added a step, confirmed the button
+relabels to "Run handoff scenario" and `collectConfig()`'s own JSON
+output has the exact persona/seed_url/capture_session/find/action
+shape entered in the form; (3) removed steps one at a time, confirmed
+the button reverts correctly at each count; (4) round-tripped a full
+2-step config through `fillForm()` (as loading a saved config would)
+and confirmed every field, including the mode-dependent Find fields
+and the Explore checkbox, was correctly rebuilt; (5) confirmed
+`resetForm()` clears the steps and reverts the button label. Separately,
+POSTed the same 4-step fixture config from the earlier verification
+directly to the running server's `/api/runs` endpoint (exactly what
+the form's own submit handler sends) and confirmed it produces the
+identical result as the CLI/API paths: 9 states, 7 flows, 0
+checkpoints, and the resulting `report.html` (served through
+`/api/runs/{id}/report`, not just the file on disk) renders the
+handoff's own flow labels and origin notes correctly.
+
+---
+
+Originally deferred here (kept for the record): every other config
+knob added this session is a flat key the existing form-based UI
+already handles; `"handoff"` is a nested, ordered list of steps that
+doesn't fit that pattern. Operator's call at the time: plan the
+design but defer the actual implementation to a later session over
+a token-budget constraint -- resolved once that constraint lifted,
+above.

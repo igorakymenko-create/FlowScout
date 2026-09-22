@@ -173,6 +173,11 @@ button.secondary {
     <div id="f-personas"></div>
     <button type="button" class="link-btn" id="f-persona-add">+ add persona</button>
 
+    <h2>Multi-actor handoff scenario <span class="hint" style="font-weight:400;">(advanced)</span> <button type="button" class="icon-btn help-trigger" data-help="handoff" title="Scripted multi-actor workflows">?</button></h2>
+    <p class="hint">For a workflow no single autonomous persona can finish alone — e.g. an admin approving a request a different user just submitted, then that SAME user continuing on. Leave empty for an ordinary crawl; adding a step below runs a scripted scenario instead — see the <span class="mono">?</span>.</p>
+    <div id="f-handoff-steps"></div>
+    <button type="button" class="link-btn" id="f-handoff-add">+ add step</button>
+
     <h2>Limits</h2>
     <div class="row2">
       <div><label for="f-depth">Max depth</label><input id="f-depth" type="number" value="4" min="1"></div>
@@ -298,6 +303,16 @@ button.secondary {
       <h4 id="help-personas">Additional personas</h4>
       <p>Crawls the same site again as a different logged-in user, one persona after another (not in parallel — two personas can corrupt each other's results through shared server-side state, e.g. one resetting cart contents mid-crawl while another is still using them), all written into <b>one</b> report. Flows are kept separate per persona even when they look identical otherwise — an admin-only page an admin can reach and a standard user can't never collapses into "the same flow" just because the destination matches. Each persona gets the same Max states / Max flows budget the crawl would give a single persona, not a shared pool that a later persona could get starved out of. Leave this empty to crawl as just the one persona defined in Credentials above (the default, and the only behavior before this existed).</p>
 
+      <h4 id="help-handoff">Multi-actor handoff scenario</h4>
+      <p>For a workflow no single autonomous persona can complete alone — e.g. an admin has to approve a request a different, ordinary user just submitted, and then that SAME user needs to come back and continue. Adding at least one step here replaces the ordinary crawl with a scripted scenario: each step runs as a named persona (matching one from Additional personas above, or <code>"default"</code>), in order.</p>
+      <p><b>Mode — Direct URL:</b> navigate straight to a known address (supports <code>{name}</code> placeholders from an earlier step's own Capture). <b>Mode — Find (search):</b> a bounded, genuinely autonomous search from "search from" (default: Start URL) for the first state whose URL/title/or any candidate's own label contains "contains" — the answer to "how does the crawler know where in the admin's own menus to find this one specific thing" without being told the exact URL. If the match is on a listing page's own link rather than the target page itself, that one link is followed automatically before the step's Action is looked for. A search that can't find anything within this run's own Limits is recorded as a real finding (a checkpoint), not silently skipped.</p>
+      <p><b>Storage state to resume:</b> leave blank for an ordinary fresh session. Set to <code>{name}</code> to resume the EXACT live session an earlier step's <b>Capture session as</b> saved — e.g. the same now-approved user account, not just a fresh login as "the same persona".</p>
+      <p><b>Action to click:</b> optional — the exact label of a candidate to click once this step's landing state is reached (e.g. <code>Approve</code>). Matched by label, not position, so a layout change between runs can't silently click the wrong thing.</p>
+      <p><b>Capture:</b> extracts a value from this step's own resulting URL via a regex (e.g. <code>/requests/(\d+)/confirmation</code> captures the id), for a LATER step to reference as <code>{name}</code> in its own Seed URL / Find fields.</p>
+      <p><b>Capture session as:</b> saves this step's own persona's live logged-in session under a name, for a LATER step's Storage state field to resume.</p>
+      <p><b>Explore normally from here:</b> hands off into a full, ordinary crawl (this run's usual Limits) from this step's landing state, merging everything it finds into the same report — the answer to "the now-approved user logs in and just keeps crawling normally".</p>
+      <p><b>Known limitation:</b> nothing here can read an email inbox. A step gated behind "click the link we emailed you" cannot be automated — the scenario stalls at the following step and reports it honestly as a checkpoint, rather than faking a click that never happened.</p>
+
       <h4>Max depth</h4>
       <p>The longest chain of steps a single flow can take from the start page. Doesn't limit how many different flows get explored — only how deep any one of them goes.</p>
 
@@ -392,6 +407,151 @@ function addPersonaBlock(name = '', creds = {}) {
   wrap.appendChild(block);
 }
 document.getElementById('f-persona-add').onclick = () => addPersonaBlock();
+
+// Multi-actor handoff scenario -- each step is EITHER a direct seed_url
+// or a bounded "find" search, plus optional action/capture/
+// capture_session/explore. See run_handoff_scenario()'s own docstring
+// in crawler.py for the full mechanism; this is just a form over that
+// same JSON shape, not a separate concept.
+function addHandoffStep(step = {}) {
+  const wrap = document.getElementById('f-handoff-steps');
+  const block = el('div', 'persona-block handoff-step');
+
+  const header = el('div', 'persona-header');
+  const personaIn = el('input'); personaIn.type = 'text';
+  personaIn.placeholder = 'persona name (matches one above, or "default")';
+  personaIn.value = step.persona || ''; personaIn.classList.add('hs-persona');
+  const rm = el('button', 'icon-btn', '×'); rm.type = 'button';
+  rm.onclick = () => { block.remove(); updateHandoffUI(); };
+  header.append(personaIn, rm);
+  block.appendChild(header);
+
+  block.appendChild(el('label', null, 'Mode'));
+  const modeSel = document.createElement('select'); modeSel.classList.add('hs-mode');
+  [['seed_url', 'Direct URL'], ['find', 'Find (search)']].forEach(([v, t]) => {
+    const opt = el('option', null, t); opt.value = v; modeSel.appendChild(opt);
+  });
+  modeSel.value = step.find ? 'find' : 'seed_url';
+  block.appendChild(modeSel);
+
+  const seedWrap = el('div', 'hs-seed-wrap');
+  seedWrap.appendChild(el('label', null, 'Seed URL'));
+  const seedIn = el('input'); seedIn.type = 'text';
+  seedIn.placeholder = 'https://.../path?x=1 (supports {captured_name})';
+  seedIn.value = step.seed_url || ''; seedIn.classList.add('hs-seed-url');
+  seedWrap.appendChild(seedIn);
+  block.appendChild(seedWrap);
+
+  const findWrap = el('div', 'hs-find-wrap');
+  findWrap.appendChild(el('label', null, 'Find: contains'));
+  const containsIn = el('input'); containsIn.type = 'text';
+  containsIn.placeholder = 'text to search for (supports {captured_name})';
+  containsIn.value = (step.find && step.find.contains) || ''; containsIn.classList.add('hs-find-contains');
+  findWrap.appendChild(containsIn);
+  findWrap.appendChild(el('label', null, 'Find: search from (optional, default: Start URL)'));
+  const searchFromIn = el('input'); searchFromIn.type = 'text';
+  searchFromIn.placeholder = 'https://.../admin/requests';
+  searchFromIn.value = (step.find && step.find.search_from) || ''; searchFromIn.classList.add('hs-find-search-from');
+  findWrap.appendChild(searchFromIn);
+  block.appendChild(findWrap);
+
+  const toggleMode = () => {
+    seedWrap.style.display = modeSel.value === 'seed_url' ? '' : 'none';
+    findWrap.style.display = modeSel.value === 'find' ? '' : 'none';
+  };
+  modeSel.onchange = toggleMode;
+  toggleMode();
+
+  block.appendChild(el('label', null, 'Storage state to resume (optional)'));
+  const storageIn = el('input'); storageIn.type = 'text';
+  storageIn.placeholder = '{session_name} from an earlier step, or leave blank';
+  storageIn.value = typeof step.storage_state === 'string' ? step.storage_state : '';
+  storageIn.classList.add('hs-storage-state');
+  block.appendChild(storageIn);
+
+  block.appendChild(el('label', null, 'Action to click (optional)'));
+  const actionIn = el('input'); actionIn.type = 'text';
+  actionIn.placeholder = 'exact candidate label, e.g. Approve';
+  actionIn.value = step.action || ''; actionIn.classList.add('hs-action');
+  block.appendChild(actionIn);
+
+  const captureRow = el('div', 'row2');
+  const capPatternWrap = el('div');
+  capPatternWrap.appendChild(el('label', null, 'Capture: URL regex (optional)'));
+  const capPatternIn = el('input'); capPatternIn.type = 'text';
+  capPatternIn.placeholder = String.raw`/requests/(\d+)/confirmation`;
+  capPatternIn.value = (step.capture && step.capture.pattern) || ''; capPatternIn.classList.add('hs-capture-pattern');
+  capPatternWrap.appendChild(capPatternIn);
+  const capAsWrap = el('div');
+  capAsWrap.appendChild(el('label', null, 'Capture: name as'));
+  const capAsIn = el('input'); capAsIn.type = 'text'; capAsIn.placeholder = 'request_id';
+  capAsIn.value = (step.capture && step.capture.as) || ''; capAsIn.classList.add('hs-capture-as');
+  capAsWrap.appendChild(capAsIn);
+  captureRow.append(capPatternWrap, capAsWrap);
+  block.appendChild(captureRow);
+
+  block.appendChild(el('label', null, 'Capture session as (optional)'));
+  const capSessIn = el('input'); capSessIn.type = 'text'; capSessIn.placeholder = 'user_session';
+  capSessIn.value = step.capture_session || ''; capSessIn.classList.add('hs-capture-session');
+  block.appendChild(capSessIn);
+
+  const exploreRow = el('div', 'check-row');
+  const exploreCb = document.createElement('input'); exploreCb.type = 'checkbox';
+  exploreCb.checked = !!step.explore; exploreCb.id = 'hs-explore-' + Math.random().toString(36).slice(2);
+  exploreCb.classList.add('hs-explore');
+  const exploreLbl = el('label', null, 'Explore normally from here after this step');
+  exploreLbl.htmlFor = exploreCb.id;
+  exploreRow.append(exploreCb, exploreLbl);
+  block.appendChild(exploreRow);
+
+  wrap.appendChild(block);
+  updateHandoffUI();
+}
+document.getElementById('f-handoff-add').onclick = () => addHandoffStep();
+
+function collectHandoffSteps() {
+  const steps = [];
+  document.querySelectorAll('#f-handoff-steps .handoff-step').forEach(block => {
+    const persona = block.querySelector('.hs-persona').value.trim();
+    const mode = block.querySelector('.hs-mode').value;
+    const step = {};
+    if (persona) step.persona = persona;
+    if (mode === 'seed_url') {
+      const url = block.querySelector('.hs-seed-url').value.trim();
+      if (url) step.seed_url = url;
+    } else {
+      const contains = block.querySelector('.hs-find-contains').value.trim();
+      const searchFrom = block.querySelector('.hs-find-search-from').value.trim();
+      if (contains) {
+        step.find = { contains };
+        if (searchFrom) step.find.search_from = searchFrom;
+      }
+    }
+    const storageState = block.querySelector('.hs-storage-state').value.trim();
+    if (storageState) step.storage_state = storageState;
+    const action = block.querySelector('.hs-action').value.trim();
+    if (action) step.action = action;
+    const capPattern = block.querySelector('.hs-capture-pattern').value.trim();
+    const capAs = block.querySelector('.hs-capture-as').value.trim();
+    if (capPattern && capAs) step.capture = { from: 'url', pattern: capPattern, as: capAs };
+    const capSession = block.querySelector('.hs-capture-session').value.trim();
+    if (capSession) step.capture_session = capSession;
+    if (block.querySelector('.hs-explore').checked) step.explore = true;
+    steps.push(step);
+  });
+  return steps;
+}
+
+// Purely cosmetic (the submit button's own label) -- reflects that
+// adding a step replaces an ordinary crawl with a scripted scenario,
+// so the button doesn't keep saying "Start crawl" once it no longer
+// does that.
+function updateHandoffUI() {
+  const btn = document.getElementById('f-submit');
+  if (btn.disabled) return; // mid-submit -- leave "Starting…" alone
+  const hasSteps = document.querySelectorAll('#f-handoff-steps .handoff-step').length > 0;
+  btn.textContent = hasSteps ? 'Run handoff scenario' : 'Start crawl';
+}
 
 document.getElementById('f-detect-fields').onclick = async () => {
   const url = document.getElementById('f-url').value.trim();
@@ -570,6 +730,8 @@ function resetForm() {
   document.getElementById('f-creds').innerHTML = '';
   addCredRow();
   document.getElementById('f-personas').innerHTML = '';
+  document.getElementById('f-handoff-steps').innerHTML = '';
+  updateHandoffUI();
   document.getElementById('f-depth').value = 4;
   document.getElementById('f-breadth').value = 8;
   document.getElementById('f-states').value = 30;
@@ -613,6 +775,10 @@ function fillForm(cfg) {
   if (personas) {
     for (const p of personas.slice(1)) addPersonaBlock(p.name || '', p.credentials || {});
   }
+  document.getElementById('f-handoff-steps').innerHTML = '';
+  const hoSteps = (cfg.handoff && cfg.handoff.steps) || [];
+  hoSteps.forEach(s => addHandoffStep(s));
+  updateHandoffUI();
   const limits = cfg.limits || {};
   document.getElementById('f-depth').value = limits.max_depth ?? 4;
   document.getElementById('f-breadth').value = limits.max_breadth_per_state ?? 8;
@@ -673,10 +839,12 @@ function collectConfig() {
   }
 
   const splitList = (s) => s.split(',').map(x => x.trim()).filter(Boolean);
+  const handoffSteps = collectHandoffSteps();
   return {
     project: document.getElementById('f-project').value.trim() || 'run',
     start_url: document.getElementById('f-url').value.trim(),
     ...(personas ? {personas} : {credentials}),
+    ...(handoffSteps.length ? {handoff: {steps: handoffSteps}} : {}),
     limits: {
       max_depth: Number(document.getElementById('f-depth').value) || 4,
       max_breadth_per_state: Number(document.getElementById('f-breadth').value) || 8,
@@ -745,7 +913,8 @@ document.getElementById('f-submit').onclick = async () => {
     errBox.textContent = 'Failed to start run: ' + e.message;
     errBox.style.display = 'block';
   } finally {
-    btn.disabled = false; btn.textContent = 'Start crawl';
+    btn.disabled = false;
+    updateHandoffUI();
   }
 };
 
