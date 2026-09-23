@@ -57,9 +57,28 @@ body {
 .badge-ok { background: var(--sem-safe-bg); color: var(--sem-safe); }
 .badge-warn { background: var(--sem-mutating-bg); color: var(--sem-mutating); }
 
-h2 { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--text-secondary); margin: 1.5rem 0 .6rem; display: flex; align-items: center; justify-content: space-between; }
+h2, details.settings-group > summary { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--text-secondary); margin: 1.5rem 0 .6rem; display: flex; align-items: center; justify-content: space-between; }
 h2:first-of-type { margin-top: 0; }
 .help-trigger { width: 20px; height: 20px; padding: 0; border-radius: 50%; font-size: 11px; text-transform: none; letter-spacing: 0; font-weight: 700; }
+
+/* Collapsible setting groups (native <details>/<summary> -- no JS
+   needed for the toggle itself). Closed by default in the markup;
+   fillForm() re-opens one whose saved config actually has content in
+   it, so a loaded run's real settings are never hidden silently. */
+details.settings-group { margin: 0; }
+details.settings-group > summary { cursor: pointer; list-style: none; user-select: none; }
+details.settings-group > summary::-webkit-details-marker { display: none; }
+details.settings-group > summary::before {
+  content: '▸'; display: inline-block; margin-right: 6px; font-size: 9px;
+  color: var(--text-tertiary); transition: transform .12s ease;
+}
+details.settings-group[open] > summary::before { transform: rotate(90deg); }
+details.settings-group > summary .summary-hint { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text-tertiary); font-size: 11px; margin-left: 6px; }
+details.settings-group[open] > summary { margin-bottom: .6rem; }
+/* Sub-sections inside the "Advanced" group are still plain <h2>s --
+   already correctly styled/spaced, just physically nested one level
+   so the surrounding <details> can hide all four at once. */
+details.settings-group .settings-subgroup:first-of-type > h2 { margin-top: .4rem; }
 
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 2rem; }
 .modal { background: var(--surface); border-radius: 12px; max-width: 640px; width: 100%; max-height: 85vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,.3); }
@@ -168,16 +187,6 @@ button.secondary {
     <p class="hint">Field names below have to match a site's own form attributes (see <span class="mono">?</span>) — this visits the Start URL and shows the real ones instead of guessing.</p>
     <div id="f-detect-results"></div>
 
-    <h2>Additional personas <button type="button" class="icon-btn help-trigger" data-help="personas" title="How multi-persona crawling works">?</button></h2>
-    <p class="hint">The Credentials above are the "default" persona. Add more to crawl the same site again as different logged-in users (e.g. admin vs. standard user), sequentially, in one run — see the <span class="mono">?</span>.</p>
-    <div id="f-personas"></div>
-    <button type="button" class="link-btn" id="f-persona-add">+ add persona</button>
-
-    <h2>Multi-actor handoff scenario <span class="hint" style="font-weight:400;">(advanced)</span> <button type="button" class="icon-btn help-trigger" data-help="handoff" title="Scripted multi-actor workflows">?</button></h2>
-    <p class="hint">For a workflow no single autonomous persona can finish alone — e.g. an admin approving a request a different user just submitted, then that SAME user continuing on. Leave empty for an ordinary crawl; adding a step below runs a scripted scenario instead — see the <span class="mono">?</span>.</p>
-    <div id="f-handoff-steps"></div>
-    <button type="button" class="link-btn" id="f-handoff-add">+ add step</button>
-
     <h2>Limits</h2>
     <div class="row2">
       <div><label for="f-depth">Max depth</label><input id="f-depth" type="number" value="4" min="1"></div>
@@ -201,55 +210,6 @@ button.secondary {
     <input id="f-exclude" type="text" placeholder="*/privacy*, */terms*">
     <p class="hint">Matched pages are treated as destructive — never visited, regardless of the toggle above.</p>
 
-    <h2>Configuration label <button type="button" class="icon-btn help-trigger" data-help="variant" title="Why this matters for change detection">?</button></h2>
-    <label for="f-variant">Variant (optional)</label>
-    <input id="f-variant" type="text" placeholder="customer-acme / flags-on / staging-eu">
-    <p class="hint">Which configuration of the app this run covers — a customer/tenant, a feature-flag set, an environment. Change detection compares a run only against previous runs with the <b>same</b> label, so two customers sharing one entry point never get diffed against each other.</p>
-
-    <h2>Mock clock <button type="button" class="icon-btn help-trigger" data-help="mock-clock" title="Getting past a time-gated control">?</button></h2>
-    <label for="f-clock-start-at">Start at (optional, ISO date)</label>
-    <input id="f-clock-start-at" type="text" placeholder="2027-01-01T00:00:00Z">
-    <label for="f-clock-fast-forward">Fast forward (optional)</label>
-    <input id="f-clock-fast-forward" type="text" placeholder="30d, 90s, or milliseconds">
-    <p class="hint">Two independent mechanisms — they don't substitute for each other. "Start at" answers a deadline checked once at page load; "Fast forward" answers a countdown/cooldown timer. Only affects client-side JavaScript timing, never a server-side check.</p>
-
-    <h2>Third-party excursions <button type="button" class="icon-btn help-trigger" data-help="excursion" title="Payment/OAuth integrations">?</button></h2>
-    <label for="f-excursion-domains">Excursion domains (comma-separated)</label>
-    <input id="f-excursion-domains" type="text" placeholder="*.stripe.com, accounts.google.com">
-    <div class="row2">
-      <div>
-        <label for="f-excursion-depth">Max excursion depth</label>
-        <input id="f-excursion-depth" type="number" min="1" value="4">
-      </div>
-      <div>
-        <label for="f-excursion-breadth">Max excursion breadth</label>
-        <input id="f-excursion-breadth" type="number" min="1" value="1">
-      </div>
-    </div>
-    <p class="hint">Only a domain listed here can be followed off-app at all — an ordinary external link stays destructive regardless. Once there, only a real progression control (a form button, or a "pay"/"continue"-style action) gets tried; breadth stays low on purpose so the walk follows one path through instead of wandering into the third party's own site.</p>
-
-    <h2>Payment sandbox testing <button type="button" class="icon-btn help-trigger" data-help="payment-sandbox" title="Card/billing data for a checkout gateway">?</button></h2>
-    <div class="check-row">
-      <input type="checkbox" id="f-sandbox-enabled">
-      <label for="f-sandbox-enabled">Enable payment sandbox testing</label>
-    </div>
-    <div id="f-sandbox-wrap" style="display:none">
-      <label for="f-sandbox-domains">Sandbox domain(s) (comma-separated)</label>
-      <input id="f-sandbox-domains" type="text" placeholder="checkout.stripe.com, *.paypal.com">
-      <p class="hint">Whatever domain your gateway's own <b>hosted, redirect-based</b> checkout page lives on — not the merchant page itself. Merged straight into Third-party excursions above; this section is just a task-specific view over the same mechanism.</p>
-      <label>Card / billing data</label>
-      <div id="f-sandbox-fields"></div>
-      <button type="button" class="link-btn" id="f-sandbox-fields-add">+ add field</button>
-      <p class="hint">Field name → value, matched the same substring way Credentials above is (name/id/placeholder/data-test) — whatever your gateway's own sandbox mode expects (e.g. Stripe's <span class="mono">4242 4242 4242 4242</span>, or a generic Visa test number like <span class="mono">4222222222222</span>). FlowScout has no built-in knowledge of any specific provider's test data — see the <span class="mono">?</span> for what this can't do.</p>
-    </div>
-
-    <h2>Direct URL seeding <button type="button" class="icon-btn help-trigger" data-help="seed-urls" title="What this is for">?</button></h2>
-    <label for="f-sitemap-url">Sitemap URL (optional)</label>
-    <input id="f-sitemap-url" type="text" placeholder="https://example.com/sitemap.xml">
-    <label for="f-seed-urls">Additional seed URLs (comma-separated)</label>
-    <input id="f-seed-urls" type="text" placeholder="https://example.com/deep-linked-page">
-    <p class="hint">Explored just like start_url — the crawler clicks around from each one too, not just visits it. Filtered by Allowed domains/Exclude URL patterns above, same as any other link.</p>
-
     <h2>Embeddings provider <button type="button" class="icon-btn help-trigger" data-help="embeddings-provider" title="What this affects and what 'unverified' means">?</button></h2>
     <p class="hint">Used by both Semantic dedup and Gap analysis below — one choice for both, since a run only ever picks one provider. Only providers with a key set (see badges above — hover a "not set" one for exactly which env var and where) will actually work.</p>
     <label for="f-embeddings-provider">Provider</label>
@@ -264,12 +224,91 @@ button.secondary {
     <input id="f-threshold" type="number" value="0.95" min="0" max="1" step="0.01">
     <p class="hint">This default (0.95) was calibrated for Gemini specifically. If you pick a different provider above, treat this number as a starting guess, not a verified value — see the provider help (<span class="mono">?</span>).</p>
 
-    <h2>Gap analysis <span class="hint" style="font-weight:400;">(optional)</span></h2>
-    <p class="hint">Attach a TCMS export now so this run's report has flows AND gap analysis together as soon as it finishes — no second step after. Leave empty to just crawl; a TCMS can still be uploaded afterward from a run's detail page.</p>
-    <label for="f-tcms">TCMS CSV</label>
-    <input id="f-tcms" type="file" accept=".csv">
-    <label for="f-gap-threshold">Gap threshold</label>
-    <input id="f-gap-threshold" type="number" min="0" max="1" step="0.01" placeholder="default">
+    <details class="settings-group" id="f-group-personas">
+      <summary>Additional personas <button type="button" class="icon-btn help-trigger" data-help="personas" title="How multi-persona crawling works">?</button></summary>
+      <p class="hint">The Credentials above are the "default" persona. Add more to crawl the same site again as different logged-in users (e.g. admin vs. standard user), sequentially, in one run — see the <span class="mono">?</span>.</p>
+      <div id="f-personas"></div>
+      <button type="button" class="link-btn" id="f-persona-add">+ add persona</button>
+    </details>
+
+    <details class="settings-group" id="f-group-variant">
+      <summary>Configuration label <button type="button" class="icon-btn help-trigger" data-help="variant" title="Why this matters for change detection">?</button></summary>
+      <label for="f-variant">Variant (optional)</label>
+      <input id="f-variant" type="text" placeholder="customer-acme / flags-on / staging-eu">
+      <p class="hint">Which configuration of the app this run covers — a customer/tenant, a feature-flag set, an environment. Change detection compares a run only against previous runs with the <b>same</b> label, so two customers sharing one entry point never get diffed against each other.</p>
+    </details>
+
+    <details class="settings-group" id="f-group-seeding">
+      <summary>Direct URL seeding <button type="button" class="icon-btn help-trigger" data-help="seed-urls" title="What this is for">?</button></summary>
+      <label for="f-sitemap-url">Sitemap URL (optional)</label>
+      <input id="f-sitemap-url" type="text" placeholder="https://example.com/sitemap.xml">
+      <label for="f-seed-urls">Additional seed URLs (comma-separated)</label>
+      <input id="f-seed-urls" type="text" placeholder="https://example.com/deep-linked-page">
+      <p class="hint">Explored just like start_url — the crawler clicks around from each one too, not just visits it. Filtered by Allowed domains/Exclude URL patterns above, same as any other link.</p>
+    </details>
+
+    <details class="settings-group" id="f-group-gap">
+      <summary>Gap analysis <span class="summary-hint">(optional)</span></summary>
+      <p class="hint">Attach a TCMS export now so this run's report has flows AND gap analysis together as soon as it finishes — no second step after. Leave empty to just crawl; a TCMS can still be uploaded afterward from a run's detail page.</p>
+      <label for="f-tcms">TCMS CSV</label>
+      <input id="f-tcms" type="file" accept=".csv">
+      <label for="f-gap-threshold">Gap threshold</label>
+      <input id="f-gap-threshold" type="number" min="0" max="1" step="0.01" placeholder="default">
+    </details>
+
+    <details class="settings-group" id="f-group-advanced">
+      <summary>Advanced <span class="summary-hint">(handoff scenarios, timing, third-party integrations)</span></summary>
+
+      <div class="settings-subgroup">
+        <h2>Multi-actor handoff scenario <button type="button" class="icon-btn help-trigger" data-help="handoff" title="Scripted multi-actor workflows">?</button></h2>
+        <p class="hint">For a workflow no single autonomous persona can finish alone — e.g. an admin approving a request a different user just submitted, then that SAME user continuing on. Leave empty for an ordinary crawl; adding a step below runs a scripted scenario instead — see the <span class="mono">?</span>.</p>
+        <div id="f-handoff-steps"></div>
+        <button type="button" class="link-btn" id="f-handoff-add">+ add step</button>
+      </div>
+
+      <div class="settings-subgroup">
+        <h2>Mock clock <button type="button" class="icon-btn help-trigger" data-help="mock-clock" title="Getting past a time-gated control">?</button></h2>
+        <label for="f-clock-start-at">Start at (optional, ISO date)</label>
+        <input id="f-clock-start-at" type="text" placeholder="2027-01-01T00:00:00Z">
+        <label for="f-clock-fast-forward">Fast forward (optional)</label>
+        <input id="f-clock-fast-forward" type="text" placeholder="30d, 90s, or milliseconds">
+        <p class="hint">Two independent mechanisms — they don't substitute for each other. "Start at" answers a deadline checked once at page load; "Fast forward" answers a countdown/cooldown timer. Only affects client-side JavaScript timing, never a server-side check.</p>
+      </div>
+
+      <div class="settings-subgroup">
+        <h2>Third-party excursions <button type="button" class="icon-btn help-trigger" data-help="excursion" title="Payment/OAuth integrations">?</button></h2>
+        <label for="f-excursion-domains">Excursion domains (comma-separated)</label>
+        <input id="f-excursion-domains" type="text" placeholder="*.stripe.com, accounts.google.com">
+        <div class="row2">
+          <div>
+            <label for="f-excursion-depth">Max excursion depth</label>
+            <input id="f-excursion-depth" type="number" min="1" value="4">
+          </div>
+          <div>
+            <label for="f-excursion-breadth">Max excursion breadth</label>
+            <input id="f-excursion-breadth" type="number" min="1" value="1">
+          </div>
+        </div>
+        <p class="hint">Only a domain listed here can be followed off-app at all — an ordinary external link stays destructive regardless. Once there, only a real progression control (a form button, or a "pay"/"continue"-style action) gets tried; breadth stays low on purpose so the walk follows one path through instead of wandering into the third party's own site.</p>
+      </div>
+
+      <div class="settings-subgroup">
+        <h2>Payment sandbox testing <button type="button" class="icon-btn help-trigger" data-help="payment-sandbox" title="Card/billing data for a checkout gateway">?</button></h2>
+        <div class="check-row">
+          <input type="checkbox" id="f-sandbox-enabled">
+          <label for="f-sandbox-enabled">Enable payment sandbox testing</label>
+        </div>
+        <div id="f-sandbox-wrap" style="display:none">
+          <label for="f-sandbox-domains">Sandbox domain(s) (comma-separated)</label>
+          <input id="f-sandbox-domains" type="text" placeholder="checkout.stripe.com, *.paypal.com">
+          <p class="hint">Whatever domain your gateway's own <b>hosted, redirect-based</b> checkout page lives on — not the merchant page itself. Merged straight into Third-party excursions above; this section is just a task-specific view over the same mechanism.</p>
+          <label>Card / billing data</label>
+          <div id="f-sandbox-fields"></div>
+          <button type="button" class="link-btn" id="f-sandbox-fields-add">+ add field</button>
+          <p class="hint">Field name → value, matched the same substring way Credentials above is (name/id/placeholder/data-test) — whatever your gateway's own sandbox mode expects (e.g. Stripe's <span class="mono">4242 4242 4242 4242</span>, or a generic Visa test number like <span class="mono">4222222222222</span>). FlowScout has no built-in knowledge of any specific provider's test data — see the <span class="mono">?</span> for what this can't do.</p>
+        </div>
+      </div>
+    </details>
 
     <button class="primary" id="f-submit">Start crawl</button>
     <div id="f-error" class="error-box" style="display:none"></div>
@@ -752,7 +791,17 @@ document.getElementById('f-save-as').onclick = async () => {
   await loadConfigs(savedName);
 };
 
+// Collapsible setting groups (native <details>) -- closed by default so
+// the sidebar doesn't force a scroll through settings most crawls never
+// touch. fillForm() re-opens a group whose saved config actually has
+// non-default content in it, so a loaded run's real settings are never
+// hidden silently behind a closed accordion.
+function closeAllSettingsGroups() {
+  document.querySelectorAll('details.settings-group').forEach(d => { d.open = false; });
+}
+
 function resetForm() {
+  closeAllSettingsGroups();
   document.getElementById('f-project').value = '';
   document.getElementById('f-url').value = '';
   document.getElementById('f-creds').innerHTML = '';
@@ -847,6 +896,21 @@ function fillForm(cfg) {
   // has nothing to do with.
   document.getElementById('f-tcms').value = '';
   document.getElementById('f-gap-threshold').value = '';
+
+  // Open exactly the collapsed groups this config actually uses --
+  // never all of them by default, so loading a config with just an
+  // Additional persona doesn't also un-collapse Advanced. Gap analysis
+  // isn't listed here: a saved config never carries a TCMS file (see
+  // above), so that group has nothing to auto-populate and always
+  // starts closed.
+  closeAllSettingsGroups();
+  if (personas && personas.length > 1) document.getElementById('f-group-personas').open = true;
+  if (cfg.variant) document.getElementById('f-group-variant').open = true;
+  if (cfg.sitemap_url || (cfg.seed_urls || []).length) document.getElementById('f-group-seeding').open = true;
+  if (hoSteps.length || mockClock.start_at || mockClock.fast_forward
+      || (cfg.excursion_domains || []).length || sandbox.enabled) {
+    document.getElementById('f-group-advanced').open = true;
+  }
 }
 
 function collectConfig() {
@@ -1100,7 +1164,14 @@ function selectRun(runId) {
 }
 
 document.querySelectorAll('.help-trigger').forEach(btn => {
-  btn.onclick = () => {
+  btn.onclick = (e) => {
+    // Several of these now sit inside a <details><summary> (the
+    // collapsible setting groups) -- without this, the click would
+    // ALSO toggle the group open/closed as the browser's own default
+    // action for a click landing on a summary, alongside opening the
+    // help modal.
+    e.preventDefault();
+    e.stopPropagation();
     document.getElementById('help-overlay').style.display = 'flex';
     const anchorId = btn.dataset.help;
     if (anchorId) {

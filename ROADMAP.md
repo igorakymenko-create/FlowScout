@@ -5501,3 +5501,79 @@ the same 5-state purchase flow through the real server.
 All 33 existing tests still pass; saucedemo.com crawl regression-
 checked unaffected; both fixtures and their ports confirmed shut down;
 no leftover Playwright/headless-Chromium processes.
+
+## Grouping the operator UI's own settings behind collapsible sections (done, Sep 2026)
+
+Raised directly: the New Run form had grown to 13 separate `<h2>`
+sections (personas, handoff, mock clock, third-party excursions,
+payment sandbox, seeding, embeddings, semantic dedup, gap analysis,
+...) -- a long scroll for the common case of a plain crawl with just
+Credentials/Limits/Safety set.
+
+**Three tiers, agreed with the operator before building:**
+1. **Always visible, never collapsed** -- New run, Credentials,
+   Limits, Safety, Embeddings provider, Semantic dedup. The last two
+   stayed out of any accordion deliberately: Semantic dedup defaults
+   ON (`checked`, 0.95 threshold) -- hiding an already-ACTIVE default
+   behind a closed section would be misleading, not tidying up.
+2. **Individually collapsed** -- Additional personas, Configuration
+   label, Direct URL seeding, Gap analysis -- each its own
+   `<details>`, closed by default, opening one never affects the
+   others.
+3. **One shared "Advanced" group** -- Multi-actor handoff scenario,
+   Mock clock, Third-party excursions, Payment sandbox testing, all
+   nested inside a single `<details>` with a one-line preview
+   ("handoff scenarios, timing, third-party integrations") so what's
+   inside is visible without opening it.
+
+**Native `<details>`/`<summary>`, not a hand-rolled accordion** --
+free keyboard/screen-reader support, zero JS needed for the toggle
+itself. The existing `h2` typography (uppercase, 12px, letter-spacing)
+was extended to `details.settings-group > summary` via one shared CSS
+selector, so a collapsed group's header looks identical to an
+always-visible one, plus a small `▸`/`▾` marker (native
+`::-webkit-details-marker` hidden, replaced with a CSS `::before` that
+rotates on `[open]`).
+
+**One real interaction bug, caught live, not assumed away:** a
+`.help-trigger` `?` button living inside a `<summary>` — clicking it
+ALSO toggled the surrounding `<details>` open/closed as the browser's
+own default action for a click landing on a summary, stacking on top
+of opening the help modal. Fixed with `event.preventDefault()` +
+`stopPropagation()` in the button's own click handler.
+
+**`fillForm()` opens exactly the groups a loaded config actually
+uses**, never all of them and never none -- checked directly per
+group (extra personas present, a variant set, seed_urls/sitemap_url
+present, or ANY of handoff steps / mock_clock / excursion_domains /
+payment_sandbox.enabled for the shared Advanced group), so loading a
+saved config that genuinely uses e.g. Additional personas never
+leaves that section hidden behind a closed accordion the operator
+would have to know to open. Gap analysis is deliberately excluded
+from this -- a saved config never carries a TCMS file (unchanged,
+pre-existing behavior), so that group has nothing to auto-populate
+and always starts closed. `resetForm()` closes every group back to
+the clean default state.
+
+**Verified live against the real running server, seven checks, not
+just that the markup renders:** all five collapsible groups start
+closed; the six always-visible tier-1 fields are visible with zero
+clicks; a summary click opens it, a second click closes it; clicking
+`?` inside a summary opens the help modal WITHOUT toggling the
+accordion (the bug above, confirmed fixed); a value typed after
+expanding a group is still correctly collected by `collectConfig()`
+after the group is collapsed again (closing only hides content
+visually, native `<details>` keeps it in the DOM); `fillForm()` opens
+only the groups a given config actually populates, leaving
+Personas/Gap analysis closed when nothing in the config touches them;
+`resetForm()` re-closes everything. Then a full real crawl end to end
+against saucedemo.com, submitted through the actual "Start crawl"
+button with a variant value typed into the Configuration label group
+and that group re-collapsed BEFORE submitting -- confirmed the value
+still reached the backend (`flows.json`'s own `config.variant` matched
+what was typed), not just that the frontend's own `collectConfig()`
+read it correctly in isolation.
+
+All 33 existing tests still pass; no leftover Playwright/headless-
+Chromium processes; the test run and its project-state directory
+cleaned up.
