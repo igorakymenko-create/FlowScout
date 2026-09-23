@@ -101,6 +101,8 @@ input[type=text], input[type=url], input[type=number], select {
 }
 input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+/* Inputs line up on their bottom edge even when one label wraps to two lines. */
+.row2 > div { display: flex; flex-direction: column; justify-content: flex-end; }
 .check-row { display: flex; align-items: center; gap: 7px; margin: 10px 0; font-size: 13px; }
 .check-row label { margin: 0; font-weight: 500; color: var(--text-primary); }
 .hint { font-size: 11px; color: var(--text-tertiary); margin-top: 3px; }
@@ -193,7 +195,7 @@ button.secondary {
       <div><label for="f-breadth">Max breadth/state</label><input id="f-breadth" type="number" value="8" min="1"></div>
       <div><label for="f-states">Max states</label><input id="f-states" type="number" value="30" min="1"></div>
       <div><label for="f-flows">Max flows</label><input id="f-flows" type="number" value="50" min="1"></div>
-      <div><label for="f-action-repeat">Max repeats of the same action</label><input id="f-action-repeat" type="number" value="2" min="1"
+      <div><label for="f-action-repeat">Max action repeats</label><input id="f-action-repeat" type="number" value="2" min="1"
         title="Caps how many times the same normalized action (e.g. &quot;add to cart&quot; on different products) can be followed within one flow. A third repeat rarely teaches the crawler anything a second one didn't -- this bounds the combinatorial state growth that repeated mutating actions cause (an N-item cart is up to 2^N reachable states) without a blanket depth limit."></div>
       <div><label for="f-action-timeout">Click/select timeout (seconds)</label><input id="f-action-timeout" type="number" value="8" min="1" step="0.5"
         title="How long to wait for a click or select_option to succeed before giving up. 8s is enough for most sites, but a slower or heavier real production deploy (not a local test fixture) can genuinely need more -- found on a live crawl where many flows failed with 'Timeout 8000ms exceeded' on a site that was simply slower than that, not broken. Raise this before raising max_depth/max_flows if errors look like this."></div>
@@ -381,7 +383,7 @@ const HELP_TOPICS = {
       <p>How many candidate actions the crawler will try from one discovered page, out of everything it finds there. Extras beyond this are skipped ("breadth limit exceeded" in the report) — in practice the most common reason a real, visible button never gets clicked, especially when a site's header/footer repeats on every page and crowds out page-specific content ahead of it. Raise this if a run's report shows a lot of breadth-limit skips on pages you care about.</p>
       <h4>Max states / Max flows</h4>
       <p>Whole-run budgets: total distinct application states discovered, and total paths walked (unique + duplicate together), before the crawl stops.</p>
-      <h4>Max repeats of the same action</h4>
+      <h4>Max action repeats</h4>
       <p>Caps how many times the same normalized action (e.g. "add to cart" on different products) can be followed within one flow. A third repeat rarely teaches the crawler anything a second one didn't — this bounds the combinatorial state growth that repeated mutating actions cause (an N-item cart is up to 2<sup>N</sup> reachable states) without needing a blanket depth limit.</p>
       <h4>Click/select timeout (seconds)</h4>
       <p>How long to wait for a click or select to succeed before giving up. 8s is enough for most sites, but a slower or heavier real production deploy (not a local test fixture) can genuinely need more — found on a live crawl where many flows failed with "Timeout 8000ms exceeded" on a site that was simply slower than that, not broken. Raise this before raising Max depth/Max flows if errors look like this.</p>
