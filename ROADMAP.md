@@ -5409,3 +5409,95 @@ across 6 different group-size shapes, determinism, the degenerate
 still pass (33 total). Saucedemo.com crawl regression-checked
 unaffected. All fixtures and their ports confirmed shut down; no
 leftover Playwright/headless-Chromium processes.
+
+## Payment sandbox testing: card/billing data for a hosted checkout gateway (done, Sep 2026)
+
+Raised directly, after walking through how a real checkout gateway
+gets crawled at all: nothing in the existing config surface let an
+operator supply card/billing data for a payment gateway's own sandbox
+mode, or made clear which real-world integration shape (a hosted,
+redirect-based checkout page vs. an embedded iframe widget) this could
+and couldn't reach.
+
+**Deliberately not a new mechanism -- a task-specific UI grouping over
+two mechanisms that already exist:** `excursion_domains` (approves
+following a gateway off `allowed_domains`) and `credentials`
+(`actions.py`'s existing field-name-substring matching, already used
+for login fields). `config["payment_sandbox"] = {"enabled": bool,
+"domains": [...], "fields": {...}}`, applied by a new
+`_apply_payment_sandbox()` (`crawler.py`) at the top of `crawl()` and
+`run_handoff_scenario()`: merges `domains` into `excursion_domains` and
+`fields` into every persona's own `credentials` (an operator's own
+existing credential always wins a same-named collision), then returns
+a plain, unmodified config when the toggle is off or absent -- every
+existing config keeps working byte-for-byte unchanged. Deliberately
+provider-agnostic: FlowScout has no built-in knowledge of Stripe,
+PayPal, Braintree, or any other gateway's own test-mode conventions --
+whatever field-name/value pairs an operator's own configured sandbox
+expects (a Stripe test card, a generic Visa test number) are just
+credentials, matched the exact same way a login username/password
+already is.
+
+**Web UI**: a new "Payment sandbox testing" section (`index.html`), a
+checkbox gating a domains field and a card/billing key-value list
+(reusing the existing `addCredRow()` row-builder verbatim -- no new
+row UI needed), collected into `config.payment_sandbox` only when
+checked (omitted entirely otherwise, so an unrelated saved config's
+payload is unaffected). No `report.py` changes needed at all --
+`StateNode.external_domain`'s existing badge/note already covers a
+sandbox excursion the same way any other approved excursion is shown.
+
+**Honest boundary, stated in the UI's own help text, not left
+implicit:** only works for a gateway's own hosted, redirect-based
+checkout page (the whole page belongs to the provider's domain) -- a
+gateway embedded as an iframe widget on the merchant's OWN page
+(Stripe Elements and similar) is not reachable. The card field lives
+in a separate document; FlowScout's form-filling walks up the DOM from
+the submit button (`.closest()`/`.parentElement`), which cannot cross
+into a nested iframe's own document at all. On that integration style
+the crawler clicks "Pay" having written nothing into the card field,
+and the gateway's own client-side validation stops it there --
+disclosed directly, not silently papered over.
+
+**Verified live, three scenarios, a real two-fixture setup (a "shop"
+handing off to a SEPARATE "gateway" domain, mirroring a real hosted-
+checkout redirect integration) -- not a single feel-good pass:**
+```
+1) Sandbox disabled entirely: gateway domain never approved, "Pay
+   with TestPay" never followed at all (destructive, out of
+   excursion scope) -- proves the checkbox genuinely gates the
+   mechanism, not just decoration.
+2) Sandbox enabled, WRONG card number: reaches the gateway's own
+   page (domain now approved) but fails ITS client-side validation
+   (the fixture only accepts one specific test number, mirroring a
+   real gateway's own discriminating sandbox behavior) -- never
+   completes the purchase. Proves this isn't a placebo that "works"
+   regardless of what data is supplied.
+3) Sandbox enabled, CORRECT card number: reaches the gateway, fills
+   the card field via the SAME credentials-matching mechanism a
+   login field already uses, completes the purchase, lands back on
+   the shop's own domain (external_domain correctly reset to "").
+```
+Found and fixed one fixture-modeling bug along the way, not a crawler
+bug: the first fixture version put the card `<input>` and "Pay"
+`<button>` as flat siblings directly under `<body>`, with nothing
+wrapping them -- `_closest_form_like_handle`'s own fallback walk
+deliberately excludes `document.body` itself from being treated as a
+form-like container (avoiding the failure mode of treating an entire
+unstructured page as "one giant form"), so the card field was never
+found and the button submitted with nothing filled in, regardless of
+what credentials said. Fixed by wrapping the fields in a plain
+container `<div>`, matching how a real checkout page's own markup
+is actually structured (never bare-siblings-under-body) -- not a
+crawler change.
+
+Also verified through the full real running server, not just the
+crawler primitive: a Playwright-driven browser session exercised the
+UI itself (checkbox toggle, field collection matching the checked
+state exactly, a full `fillForm()`/`resetForm()` round-trip), and a
+direct `POST /api/runs` with `payment_sandbox` in the body completed
+the same 5-state purchase flow through the real server.
+
+All 33 existing tests still pass; saucedemo.com crawl regression-
+checked unaffected; both fixtures and their ports confirmed shut down;
+no leftover Playwright/headless-Chromium processes.

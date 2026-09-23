@@ -228,6 +228,21 @@ button.secondary {
     </div>
     <p class="hint">Only a domain listed here can be followed off-app at all — an ordinary external link stays destructive regardless. Once there, only a real progression control (a form button, or a "pay"/"continue"-style action) gets tried; breadth stays low on purpose so the walk follows one path through instead of wandering into the third party's own site.</p>
 
+    <h2>Payment sandbox testing <button type="button" class="icon-btn help-trigger" data-help="payment-sandbox" title="Card/billing data for a checkout gateway">?</button></h2>
+    <div class="check-row">
+      <input type="checkbox" id="f-sandbox-enabled">
+      <label for="f-sandbox-enabled">Enable payment sandbox testing</label>
+    </div>
+    <div id="f-sandbox-wrap" style="display:none">
+      <label for="f-sandbox-domains">Sandbox domain(s) (comma-separated)</label>
+      <input id="f-sandbox-domains" type="text" placeholder="checkout.stripe.com, *.paypal.com">
+      <p class="hint">Whatever domain your gateway's own <b>hosted, redirect-based</b> checkout page lives on — not the merchant page itself. Merged straight into Third-party excursions above; this section is just a task-specific view over the same mechanism.</p>
+      <label>Card / billing data</label>
+      <div id="f-sandbox-fields"></div>
+      <button type="button" class="link-btn" id="f-sandbox-fields-add">+ add field</button>
+      <p class="hint">Field name → value, matched the same substring way Credentials above is (name/id/placeholder/data-test) — whatever your gateway's own sandbox mode expects (e.g. Stripe's <span class="mono">4242 4242 4242 4242</span>, or a generic Visa test number like <span class="mono">4222222222222</span>). FlowScout has no built-in knowledge of any specific provider's test data — see the <span class="mono">?</span> for what this can't do.</p>
+    </div>
+
     <h2>Direct URL seeding <button type="button" class="icon-btn help-trigger" data-help="seed-urls" title="What this is for">?</button></h2>
     <label for="f-sitemap-url">Sitemap URL (optional)</label>
     <input id="f-sitemap-url" type="text" placeholder="https://example.com/sitemap.xml">
@@ -340,6 +355,10 @@ button.secondary {
       <h4 id="help-excursion">Third-party excursions</h4>
       <p>Any navigation off <code>allowed_domains</code> is normally <b>destructive</b> and never followed — a payment gateway, an OAuth/SSO provider, or a billing portal would otherwise be structurally invisible. Listing a domain here (wildcards allowed, e.g. <code>*.stripe.com</code>) approves it specifically, with a much narrower budget than the app itself gets: breadth capped low (default 1 — follow one path through, don't branch into the third party's own marketing pages) and depth capped independently of the app's own Max depth (default 4 — a real integration is typically a handful of screens). Once back in <code>allowed_domains</code>, both caps reset and ordinary exploration resumes. Only a real progression control (a form's own button/input, or one matching a "pay"/"continue"/"confirm"-style action) is ever tried there — never a plain link, which is exactly the "wander to another page" affordance this is built to avoid.</p>
 
+      <h4 id="help-payment-sandbox">Payment sandbox testing</h4>
+      <p>A task-specific grouping over the SAME two mechanisms Third-party excursions and Credentials already provide — not a new concept underneath. Checking <b>Enable</b> merges <b>Sandbox domain(s)</b> straight into <code>excursion_domains</code> above, and <b>Card / billing data</b> straight into whichever persona's <code>credentials</code> would otherwise be used — matched the exact same field-name-substring way a login username/password already is. Deliberately provider-agnostic: FlowScout has no built-in knowledge of Stripe, PayPal, Braintree, or any other gateway's own test-mode conventions. Put whatever YOUR configured sandbox expects — a Stripe test card (<code>4242 4242 4242 4242</code>), a generic Visa test number (<code>4222222222222</code>), or anything else — as field name → value pairs, the same as any other credential.</p>
+      <p><b>Known limitation, verified live, not just assumed:</b> this only works for a gateway's own <b>hosted, redirect-based</b> checkout page (Stripe Checkout, PayPal's own hosted flow — the whole page belongs to the provider's domain). A gateway <b>embedded as an iframe widget on the merchant's own page</b> (Stripe Elements and similar) is NOT reachable this way — the card field lives inside a separate document, and FlowScout's form-filling walks up the DOM from the submit button (<code>.closest()</code>/<code>.parentElement</code>), which can't cross into a nested iframe's own document at all. On that style of integration, the crawler will click "Pay" having never written anything into the card field, and the gateway's own client-side validation stops it right there — a real, disclosed gap, not silently papered over. Even on a page this DOES reach, a wrong or malformed test value still won't pass the gateway's own client-side format validation (Luhn check, recognized test-card patterns) — this only gets you as far as your own sandbox data is actually valid for that provider.</p>
+
       <h4 id="help-seed-urls">Direct URL seeding</h4>
       <p>The crawler otherwise only ever finds what it can click its way to from Start URL — a page with no inbound link anywhere in the crawled UI (a deep-linked SPA route, an old landing page still live but delisted from navigation) is invisible no matter how thoroughly the rest of the app gets explored. A <b>Sitemap URL</b> is fetched and parsed automatically (a plain sitemap, or a sitemap index of child sitemaps, recursed one level); <b>Additional seed URLs</b> is a plain list you already know about. Either way, each one is explored with the crawler's full normal logic from there onward, not just visited once and left alone — reported as its own "Open URL directly" flow, plus whatever it leads to. Filtered exactly like an ordinary link: dropped if outside Allowed domains, dropped if it matches an Exclude URL pattern, dropped if it's just Start URL itself. Capped at 50 seed URLs by default (a real sitemap can list thousands; raise it with <code>max_seed_urls</code> in a JSON config if you actually want that).</p>
 
@@ -407,6 +426,15 @@ function addPersonaBlock(name = '', creds = {}) {
   wrap.appendChild(block);
 }
 document.getElementById('f-persona-add').onclick = () => addPersonaBlock();
+
+// Payment sandbox testing -- a task-specific view over the SAME two
+// existing mechanisms (excursion_domains + credentials), not a new
+// concept server-side (see crawler.py's _apply_payment_sandbox());
+// the field-rows below reuse addCredRow() exactly as Credentials does.
+document.getElementById('f-sandbox-enabled').onchange = (e) => {
+  document.getElementById('f-sandbox-wrap').style.display = e.target.checked ? '' : 'none';
+};
+document.getElementById('f-sandbox-fields-add').onclick = () => addCredRow('', '', document.getElementById('f-sandbox-fields'));
 
 // Multi-actor handoff scenario -- each step is EITHER a direct seed_url
 // or a bounded "find" search, plus optional action/capture/
@@ -747,6 +775,10 @@ function resetForm() {
   document.getElementById('f-excursion-domains').value = '';
   document.getElementById('f-excursion-depth').value = 4;
   document.getElementById('f-excursion-breadth').value = 1;
+  document.getElementById('f-sandbox-enabled').checked = false;
+  document.getElementById('f-sandbox-wrap').style.display = 'none';
+  document.getElementById('f-sandbox-domains').value = '';
+  document.getElementById('f-sandbox-fields').innerHTML = '';
   document.getElementById('f-sitemap-url').value = '';
   document.getElementById('f-seed-urls').value = '';
   document.getElementById('f-embeddings-provider').value = 'gemini';
@@ -796,6 +828,12 @@ function fillForm(cfg) {
   document.getElementById('f-excursion-domains').value = (cfg.excursion_domains || []).join(', ');
   document.getElementById('f-excursion-depth').value = cfg.excursion_max_depth ?? 4;
   document.getElementById('f-excursion-breadth').value = cfg.excursion_max_breadth ?? 1;
+  const sandbox = cfg.payment_sandbox || {};
+  document.getElementById('f-sandbox-enabled').checked = !!sandbox.enabled;
+  document.getElementById('f-sandbox-wrap').style.display = sandbox.enabled ? '' : 'none';
+  document.getElementById('f-sandbox-domains').value = (sandbox.domains || []).join(', ');
+  document.getElementById('f-sandbox-fields').innerHTML = '';
+  Object.entries(sandbox.fields || {}).forEach(([k, v]) => addCredRow(k, v, document.getElementById('f-sandbox-fields')));
   document.getElementById('f-sitemap-url').value = cfg.sitemap_url || '';
   document.getElementById('f-seed-urls').value = (cfg.seed_urls || []).join(', ');
   document.getElementById('f-embeddings-provider').value = cfg.embeddings_provider || 'gemini';
@@ -869,6 +907,16 @@ function collectConfig() {
     excursion_domains: splitList(document.getElementById('f-excursion-domains').value),
     excursion_max_depth: Number(document.getElementById('f-excursion-depth').value) || 4,
     excursion_max_breadth: Number(document.getElementById('f-excursion-breadth').value) || 1,
+    ...(() => {
+      if (!document.getElementById('f-sandbox-enabled').checked) return {};
+      const domains = splitList(document.getElementById('f-sandbox-domains').value);
+      const fields = {};
+      document.querySelectorAll('#f-sandbox-fields .kv-row').forEach(row => {
+        const [kIn, vIn] = row.querySelectorAll('input');
+        if (kIn.value.trim()) fields[kIn.value.trim()] = vIn.value;
+      });
+      return {payment_sandbox: {enabled: true, domains, fields}};
+    })(),
     sitemap_url: document.getElementById('f-sitemap-url').value.trim(),
     seed_urls: splitList(document.getElementById('f-seed-urls').value),
     embeddings_provider: document.getElementById('f-embeddings-provider').value || 'gemini',

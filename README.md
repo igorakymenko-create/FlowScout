@@ -93,6 +93,18 @@ verify quickly — it doesn't replace knowing what to point it at.
   real integration through to completion instead of wandering into the
   third party's own marketing pages, then resumes ordinary exploration
   the moment it returns.
+- **Completes a real hosted checkout gateway's own sandbox flow** —
+  "Payment sandbox testing" groups a domain (the gateway's own
+  `excursion_domains` entry) with card/billing data (matched into
+  `credentials` the exact same field-name way a login is) behind one
+  checkbox. Provider-agnostic — FlowScout has no built-in knowledge of
+  Stripe/PayPal/any specific gateway's own test-mode conventions, just
+  whatever field values that sandbox expects. Works for a gateway's
+  own hosted, redirect-based checkout page; an iframe-embedded widget
+  on the merchant's own page (Stripe Elements and similar) isn't
+  reachable this way — the card field lives in a separate document
+  the form-filling mechanism can't cross into, disclosed directly in
+  the UI rather than silently failing unexplained.
 - **Gets past a client-side time-gated control** (a "resend code in
   00:30" cooldown, an "available starting &lt;date&gt;" check) via
   `"mock_clock"` — `start_at` answers an absolute-deadline check made

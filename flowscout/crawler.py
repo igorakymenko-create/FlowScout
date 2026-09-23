@@ -1006,7 +1006,64 @@ def _run_dfs(browser, config: dict, run: RunResult, credentials: dict, persona_n
     return None
 
 
+def _apply_payment_sandbox(config: dict) -> dict:
+    """Merges `config["payment_sandbox"]` into the two EXISTING
+    mechanisms that already do the actual work -- `excursion_domains`
+    (approves following a real payment gateway off allowed_domains --
+    see risk.classify()'s own docstring) and `credentials`
+    (actions.py's `_synth_value()` field-name matching, already used
+    for login fields) -- rather than inventing a third, parallel
+    concept. Deliberately provider-agnostic: FlowScout has no built-in
+    knowledge of Stripe, PayPal, or any other gateway's own test-mode
+    conventions (a Stripe test card, a Braintree one, and a plain
+    "Visa test card" number are all just field values an operator
+    supplies, matched the same field-name-substring way a login
+    username/password already is) -- this is a UI/config grouping for
+    a specific task, not new matching logic.
+
+    A no-op (returns `config` itself, unchanged) when `payment_sandbox`
+    is absent or not enabled -- every existing config keeps working
+    exactly as before this existed. Returns a NEW dict when enabled
+    (config and its own "personas" list are never mutated in place) --
+    callers elsewhere (the web UI's saved-config JSON, an in-memory
+    config dict a caller still holds a reference to) are never
+    surprised by a mutation they didn't ask for.
+
+    Sandbox fields fill in ONLY behind whatever a persona's/the
+    top-level credentials dict already defines -- an operator's own
+    explicit login credential always wins a same-named collision
+    (unlikely in practice, but an existing config should never be
+    silently overridden by a newer, unrelated feature)."""
+    sandbox = config.get("payment_sandbox")
+    if not sandbox or not sandbox.get("enabled"):
+        return config
+    domains = sandbox.get("domains") or []
+    fields = sandbox.get("fields") or {}
+    if not domains:
+        raise ValueError("payment_sandbox is enabled but has no domains -- nothing would ever be approved "
+                          "to follow off allowed_domains")
+    if not fields:
+        raise ValueError("payment_sandbox is enabled but has no fields -- nothing would ever be filled "
+                          "into the gateway's own form")
+
+    merged_excursion = list(config.get("excursion_domains", []))
+    for d in domains:
+        if d not in merged_excursion:
+            merged_excursion.append(d)
+
+    new_config = {**config, "excursion_domains": merged_excursion}
+    if config.get("personas"):
+        new_config["personas"] = [
+            {**p, "credentials": {**fields, **p.get("credentials", {})}}
+            for p in config["personas"]
+        ]
+    else:
+        new_config["credentials"] = {**fields, **config.get("credentials", {})}
+    return new_config
+
+
 def crawl(config: dict) -> RunResult:
+    config = _apply_payment_sandbox(config)
     from playwright.sync_api import sync_playwright
 
     limits = config["limits"]
@@ -2011,6 +2068,7 @@ def run_handoff_scenario(config: dict) -> RunResult:
     will simply fail to find what it's looking for, recorded honestly
     as a checkpoint) rather than silently skipping past it or
     fabricating a click that never really happened."""
+    config = _apply_payment_sandbox(config)
     from playwright.sync_api import sync_playwright
 
     steps = config["handoff"]["steps"]
