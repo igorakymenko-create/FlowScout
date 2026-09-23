@@ -5577,3 +5577,52 @@ read it correctly in isolation.
 All 33 existing tests still pass; no leftover Playwright/headless-
 Chromium processes; the test run and its project-state directory
 cleaned up.
+
+## Per-group help popups, replacing one long scrollable modal (done, Sep 2026)
+
+Raised directly, right after the settings-grouping pass above: the
+help system hadn't kept pace with the settings themselves. Audited
+every field against the single existing help modal's own content and
+found real gaps, not assumed ones:
+- **Five sections had no help entry point at all** -- Credentials,
+  Limits, Safety, Semantic dedup, Gap analysis never had a `?` button,
+  even though most of that content already existed buried inside the
+  modal (unreachable without already knowing to scroll there).
+- **Two fields were entirely undocumented anywhere** -- Max repeats of
+  the same action and Click/select timeout (Limits) had only their own
+  inline hover tooltip, no modal entry at all.
+- **A whole settings group had zero documentation** -- Gap analysis
+  (TCMS CSV, gap threshold) was never written up anywhere.
+
+**The bigger complaint, addressed structurally, not just patched:**
+every `?` button opened the SAME long modal and scrolled to an anchor
+inside it -- one giant document to hunt through, not a focused answer
+to "what does THIS group do". Replaced with a `HELP_TOPICS` JS object
+(14 entries, one per settings group) and a single reusable modal shell
+whose title/body get populated on demand -- `btn.dataset.help` picks
+the topic, `innerHTML` swaps the ENTIRE body, so each popup shows only
+its own group's own content, nothing else, every time. Every settings
+group now has exactly one entry: New run, Credentials, Limits, Safety,
+Embeddings provider, Semantic dedup, Additional personas,
+Configuration label, Direct URL seeding, Gap analysis, Multi-actor
+handoff scenario, Mock clock, Third-party excursions, Payment sandbox
+testing.
+
+**Verified live, six checks, not just that the JS parses:**
+- All 14 `data-help` keys in the HTML have a matching `HELP_TOPICS`
+  entry and vice versa (cross-checked directly, not eyeballed).
+- Every one of the 14 buttons opens a popup with the correct title and
+  non-empty body.
+- Opening a second topic fully REPLACES the first one's content (no
+  leftover text from a previous popup) -- `innerHTML =`, not `+=`, by
+  construction, confirmed live.
+- The five previously-missing entry points (Credentials, Limits,
+  Safety, Semantic dedup, Gap analysis) are now genuinely reachable.
+- The two previously-undocumented Limits fields, and the whole Gap
+  analysis topic, now have real content, not just a title.
+- The earlier `preventDefault()`/`stopPropagation()` fix (a `?` inside
+  a `<summary>` shouldn't also toggle the accordion) still holds with
+  the new dynamic-content click handler.
+
+All 33 existing tests still pass; no leftover Playwright/headless-
+Chromium processes.

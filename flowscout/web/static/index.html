@@ -166,7 +166,7 @@ button.secondary {
       <span id="key-badges" style="display:flex; gap:4px; flex-wrap:wrap;"></span>
     </div>
 
-    <h2>New run <button type="button" class="icon-btn help-trigger" id="help-btn" title="How these settings work">?</button></h2>
+    <h2>New run <button type="button" class="icon-btn help-trigger" data-help="new-run" title="What these fields do">?</button></h2>
     <label for="f-load">Load saved config</label>
     <div style="display:flex; gap:6px;">
       <select id="f-load" style="flex:1"><option value="">— blank —</option></select>
@@ -180,14 +180,14 @@ button.secondary {
     <label for="f-url">Start URL</label>
     <input id="f-url" type="url" placeholder="https://example.com/">
 
-    <h2>Credentials</h2>
+    <h2>Credentials <button type="button" class="icon-btn help-trigger" data-help="credentials" title="How field matching works">?</button></h2>
     <div id="f-creds"></div>
     <button type="button" class="link-btn" id="f-creds-add">+ add field</button>
     <button type="button" class="link-btn" id="f-detect-fields">🔍 Detect fields from site</button>
     <p class="hint">Field names below have to match a site's own form attributes (see <span class="mono">?</span>) — this visits the Start URL and shows the real ones instead of guessing.</p>
     <div id="f-detect-results"></div>
 
-    <h2>Limits</h2>
+    <h2>Limits <button type="button" class="icon-btn help-trigger" data-help="limits" title="What each budget controls">?</button></h2>
     <div class="row2">
       <div><label for="f-depth">Max depth</label><input id="f-depth" type="number" value="4" min="1"></div>
       <div><label for="f-breadth">Max breadth/state</label><input id="f-breadth" type="number" value="8" min="1"></div>
@@ -199,7 +199,7 @@ button.secondary {
         title="How long to wait for a click or select_option to succeed before giving up. 8s is enough for most sites, but a slower or heavier real production deploy (not a local test fixture) can genuinely need more -- found on a live crawl where many flows failed with 'Timeout 8000ms exceeded' on a site that was simply slower than that, not broken. Raise this before raising max_depth/max_flows if errors look like this."></div>
     </div>
 
-    <h2>Safety</h2>
+    <h2>Safety <button type="button" class="icon-btn help-trigger" data-help="safety" title="Risk tiers and what each toggle controls">?</button></h2>
     <div class="check-row">
       <input type="checkbox" id="f-mutating">
       <label for="f-mutating">Allow mutating actions (add-to-cart, checkout, submit…)</label>
@@ -215,7 +215,7 @@ button.secondary {
     <label for="f-embeddings-provider">Provider</label>
     <select id="f-embeddings-provider"></select>
 
-    <h2>Semantic dedup</h2>
+    <h2>Semantic dedup <button type="button" class="icon-btn help-trigger" data-help="semantic-dedup" title="What this merges and why">?</button></h2>
     <div class="check-row">
       <input type="checkbox" id="f-semantic" checked>
       <label for="f-semantic">Enabled (needs an embeddings provider key, see above)</label>
@@ -248,7 +248,7 @@ button.secondary {
     </details>
 
     <details class="settings-group" id="f-group-gap">
-      <summary>Gap analysis <span class="summary-hint">(optional)</span></summary>
+      <summary>Gap analysis <span class="summary-hint">(optional)</span> <button type="button" class="icon-btn help-trigger" data-help="gap-analysis" title="What this compares and how">?</button></summary>
       <p class="hint">Attach a TCMS export now so this run's report has flows AND gap analysis together as soon as it finishes — no second step after. Leave empty to just crawl; a TCMS can still be uploaded afterward from a run's detail page.</p>
       <label for="f-tcms">TCMS CSV</label>
       <input id="f-tcms" type="file" accept=".csv">
@@ -330,87 +330,10 @@ button.secondary {
 <div class="modal-overlay" id="help-overlay" style="display:none">
   <div class="modal">
     <div class="modal-header">
-      <h3>How these settings work</h3>
+      <h3 id="help-title">Help</h3>
       <button type="button" class="icon-btn" id="help-close">×</button>
     </div>
-    <div class="modal-body">
-      <p>Every candidate action the crawler finds gets one of three risk tiers before it's ever clicked. This is what most fields below actually control.</p>
-      <table>
-        <tr><th>Tier</th><th>Meaning</th><th>Followed?</th></tr>
-        <tr><td><b>safe</b></td><td>navigation — links, opening menus, viewing pages</td><td>always</td></tr>
-        <tr><td><b>mutating</b></td><td>changes state — add to cart, checkout, submit, purchase…</td><td>only if <code>allow_mutating</code> is on</td></tr>
-        <tr><td><b>destructive</b></td><td>logout, leaving the allowed domain(s), an excluded page</td><td>never — no toggle overrides this</td></tr>
-      </table>
-
-      <h4>Load saved config</h4>
-      <p>Prefills every field below from a JSON file in <code>configs/</code>. There's no limit on how many you can save — it's just files in a folder. Selecting <b>— blank —</b> resets the form to defaults. <b>Save current settings as…</b> writes the form to a new (or overwritten) file; the 🗑 button next to the dropdown deletes the selected one. All of this is also just editable by hand in <code>configs/*.json</code> if you prefer a text editor.</p>
-
-      <h4>Project name</h4>
-      <p>A label only — names the run's folder (<code>runs/&lt;project&gt;-&lt;timestamp&gt;-&lt;id&gt;</code>) and how it shows up in the list. No effect on crawl behavior.</p>
-
-      <h4>Start URL</h4>
-      <p>Where the crawl begins. Everything discovered has to be reachable by following links from here.</p>
-
-      <h4>Credentials</h4>
-      <p>Field-name → value pairs. When the crawler finds a form (e.g. a login page), it fills each input by matching a key against the input's <code>name</code>/<code>id</code>/<code>placeholder</code>/<code>data-test</code>/<code>data-testid</code> (all of them together, not just one) — case-insensitive, substring match. So a key of <code>user</code> matches an input named <code>user-name</code> just as well as one named <code>username</code> or marked <code>data-test="username"</code> — but the exact strings <code>user-name</code> and <code>username</code> do NOT match <em>each other</em> (the hyphen makes neither a substring of the other), so a key has to actually match something on the real page, not just look close to it. Use <b>🔍 Detect fields from site</b> above to see a page's real attribute values instead of guessing. Fields that don't match anything get a synthetic safe value instead (e.g. <code>flowscout_test</code>) — never left blank, never guessed from the page.</p>
-
-      <h4 id="help-personas">Additional personas</h4>
-      <p>Crawls the same site again as a different logged-in user, one persona after another (not in parallel — two personas can corrupt each other's results through shared server-side state, e.g. one resetting cart contents mid-crawl while another is still using them), all written into <b>one</b> report. Flows are kept separate per persona even when they look identical otherwise — an admin-only page an admin can reach and a standard user can't never collapses into "the same flow" just because the destination matches. Each persona gets the same Max states / Max flows budget the crawl would give a single persona, not a shared pool that a later persona could get starved out of. Leave this empty to crawl as just the one persona defined in Credentials above (the default, and the only behavior before this existed).</p>
-
-      <h4 id="help-handoff">Multi-actor handoff scenario</h4>
-      <p>For a workflow no single autonomous persona can complete alone — e.g. an admin has to approve a request a different, ordinary user just submitted, and then that SAME user needs to come back and continue. Adding at least one step here replaces the ordinary crawl with a scripted scenario: each step runs as a named persona (matching one from Additional personas above, or <code>"default"</code>), in order.</p>
-      <p><b>Mode — Direct URL:</b> navigate straight to a known address (supports <code>{name}</code> placeholders from an earlier step's own Capture). <b>Mode — Find (search):</b> a bounded, genuinely autonomous search from "search from" (default: Start URL) for the first state whose URL/title/or any candidate's own label contains "contains" — the answer to "how does the crawler know where in the admin's own menus to find this one specific thing" without being told the exact URL. If the match is on a listing page's own link rather than the target page itself, that one link is followed automatically before the step's Action is looked for. A search that can't find anything within this run's own Limits is recorded as a real finding (a checkpoint), not silently skipped.</p>
-      <p><b>Storage state to resume:</b> leave blank for an ordinary fresh session. Set to <code>{name}</code> to resume the EXACT live session an earlier step's <b>Capture session as</b> saved — e.g. the same now-approved user account, not just a fresh login as "the same persona".</p>
-      <p><b>Action to click:</b> optional — the exact label of a candidate to click once this step's landing state is reached (e.g. <code>Approve</code>). Matched by label, not position, so a layout change between runs can't silently click the wrong thing.</p>
-      <p><b>Capture:</b> extracts a value from this step's own resulting URL via a regex (e.g. <code>/requests/(\d+)/confirmation</code> captures the id), for a LATER step to reference as <code>{name}</code> in its own Seed URL / Find fields.</p>
-      <p><b>Capture session as:</b> saves this step's own persona's live logged-in session under a name, for a LATER step's Storage state field to resume.</p>
-      <p><b>Explore normally from here:</b> hands off into a full, ordinary crawl (this run's usual Limits) from this step's landing state, merging everything it finds into the same report — the answer to "the now-approved user logs in and just keeps crawling normally".</p>
-      <p><b>Known limitation:</b> nothing here can read an email inbox. A step gated behind "click the link we emailed you" cannot be automated — the scenario stalls at the following step and reports it honestly as a checkpoint, rather than faking a click that never happened.</p>
-
-      <h4>Max depth</h4>
-      <p>The longest chain of steps a single flow can take from the start page. Doesn't limit how many different flows get explored — only how deep any one of them goes.</p>
-
-      <h4>Max breadth / state</h4>
-      <p>How many candidate actions the crawler will try from one discovered page, out of everything it finds there. Extras beyond this are skipped ("breadth limit exceeded" in the report) — in practice the most common reason a real, visible button never gets clicked, especially when a site's header/footer repeats on every page and crowds out page-specific content ahead of it. Raise this if a run's report shows a lot of breadth-limit skips on pages you care about.</p>
-
-      <h4>Max states / Max flows</h4>
-      <p>Whole-run budgets: total distinct application states discovered, and total paths walked (unique + duplicate together), before the crawl stops.</p>
-
-      <h4>Allow mutating actions</h4>
-      <p>Off by default. When off, only <b>safe</b> actions are ever clicked. Turn this on when you're fine with the crawler actually performing add-to-cart/checkout/submit-style actions on the target — safe on a demo/QA site with fake data, risky on a site with a real payment processor wired up.</p>
-
-      <h4>Allowed domains</h4>
-      <p>The crawl never navigates outside these domains, regardless of the toggle above — anything pointing elsewhere is <b>destructive</b> and skipped, no exceptions.</p>
-
-      <h4>Exclude URL patterns</h4>
-      <p>Glob patterns (e.g. <code>*/privacy*</code>) for pages you never want visited — legal pages, social links, anything not worth the crawl budget or not safe to touch. Same treatment as an external domain: always <b>destructive</b>, independent of the mutating toggle. Doesn't apply to in-page anchors (e.g. <code>#faq</code>) — only real page navigations have a path to match against.</p>
-
-      <h4 id="help-variant">Configuration label (variant)</h4>
-      <p>Names <b>which configuration of the app</b> a run covers — one customer/tenant, one feature-flag set, one environment. It changes nothing about how the crawl itself runs; it scopes the durable project state that <b>change detection</b> compares against (<code>projects/&lt;project&gt;/variants/&lt;variant&gt;/state.json</code>). Without it, crawling customer A and then customer B under the same project name diffs B against A's baseline: every flow unique to A reads as &ldquo;missing since last run&rdquo; and every flow unique to B as &ldquo;new&rdquo;, when nothing actually changed in either system. Leave it blank for a single-configuration project — that keeps the original, unscoped state file, exactly as before this existed.</p>
-
-      <h4 id="help-mock-clock">Mock clock</h4>
-      <p>Gets past a control gated behind client-side time — a "resend code in 00:30" cooldown, an "available starting &lt;date&gt;" check. Two <b>independent</b> Playwright Clock API mechanisms, verified live to NOT substitute for each other: <b>Start at</b> (<code>page.clock.install(time=...)</code>, before the page loads) answers a <code>Date.now()</code>/<code>new Date()</code> comparison against an absolute deadline, checked once at load — fast-forwarding afterward does nothing for this case, since the check already ran. <b>Fast forward</b> (<code>page.clock.fast_forward(...)</code>, applied once right after the page's own initial load) answers a <code>setTimeout</code>/<code>setInterval</code>-scheduled cooldown — pre-setting a future start date does nothing for this case, since a timer scheduled at load always waits its own full duration regardless of what date it thinks it is. A real site can use either pattern; set whichever one matches what you know about the target, or both. Accepts a friendly <code>"&lt;N&gt;&lt;unit&gt;"</code> duration (<code>s</code>/<code>m</code>/<code>h</code>/<code>d</code>, e.g. <code>30d</code>), raw milliseconds, or Playwright's own <code>"HH:MM:SS"</code> form. Only ever touches client-side JavaScript timing — a real timestamp checked by the app's own backend is unreachable from outside the browser, and this can't do anything about it.</p>
-
-      <h4 id="help-excursion">Third-party excursions</h4>
-      <p>Any navigation off <code>allowed_domains</code> is normally <b>destructive</b> and never followed — a payment gateway, an OAuth/SSO provider, or a billing portal would otherwise be structurally invisible. Listing a domain here (wildcards allowed, e.g. <code>*.stripe.com</code>) approves it specifically, with a much narrower budget than the app itself gets: breadth capped low (default 1 — follow one path through, don't branch into the third party's own marketing pages) and depth capped independently of the app's own Max depth (default 4 — a real integration is typically a handful of screens). Once back in <code>allowed_domains</code>, both caps reset and ordinary exploration resumes. Only a real progression control (a form's own button/input, or one matching a "pay"/"continue"/"confirm"-style action) is ever tried there — never a plain link, which is exactly the "wander to another page" affordance this is built to avoid.</p>
-
-      <h4 id="help-payment-sandbox">Payment sandbox testing</h4>
-      <p>A task-specific grouping over the SAME two mechanisms Third-party excursions and Credentials already provide — not a new concept underneath. Checking <b>Enable</b> merges <b>Sandbox domain(s)</b> straight into <code>excursion_domains</code> above, and <b>Card / billing data</b> straight into whichever persona's <code>credentials</code> would otherwise be used — matched the exact same field-name-substring way a login username/password already is. Deliberately provider-agnostic: FlowScout has no built-in knowledge of Stripe, PayPal, Braintree, or any other gateway's own test-mode conventions. Put whatever YOUR configured sandbox expects — a Stripe test card (<code>4242 4242 4242 4242</code>), a generic Visa test number (<code>4222222222222</code>), or anything else — as field name → value pairs, the same as any other credential.</p>
-      <p><b>Known limitation, verified live, not just assumed:</b> this only works for a gateway's own <b>hosted, redirect-based</b> checkout page (Stripe Checkout, PayPal's own hosted flow — the whole page belongs to the provider's domain). A gateway <b>embedded as an iframe widget on the merchant's own page</b> (Stripe Elements and similar) is NOT reachable this way — the card field lives inside a separate document, and FlowScout's form-filling walks up the DOM from the submit button (<code>.closest()</code>/<code>.parentElement</code>), which can't cross into a nested iframe's own document at all. On that style of integration, the crawler will click "Pay" having never written anything into the card field, and the gateway's own client-side validation stops it right there — a real, disclosed gap, not silently papered over. Even on a page this DOES reach, a wrong or malformed test value still won't pass the gateway's own client-side format validation (Luhn check, recognized test-card patterns) — this only gets you as far as your own sandbox data is actually valid for that provider.</p>
-
-      <h4 id="help-seed-urls">Direct URL seeding</h4>
-      <p>The crawler otherwise only ever finds what it can click its way to from Start URL — a page with no inbound link anywhere in the crawled UI (a deep-linked SPA route, an old landing page still live but delisted from navigation) is invisible no matter how thoroughly the rest of the app gets explored. A <b>Sitemap URL</b> is fetched and parsed automatically (a plain sitemap, or a sitemap index of child sitemaps, recursed one level); <b>Additional seed URLs</b> is a plain list you already know about. Either way, each one is explored with the crawler's full normal logic from there onward, not just visited once and left alone — reported as its own "Open URL directly" flow, plus whatever it leads to. Filtered exactly like an ordinary link: dropped if outside Allowed domains, dropped if it matches an Exclude URL pattern, dropped if it's just Start URL itself. Capped at 50 seed URLs by default (a real sitemap can list thousands; raise it with <code>max_seed_urls</code> in a JSON config if you actually want that).</p>
-
-      <h4 id="help-embeddings-provider">Embeddings provider</h4>
-      <p>Both Semantic dedup and Gap analysis need a text-embeddings API call to compare flows/test cases by meaning, not just exact text. Gemini was the only option originally; OpenAI and Voyage AI (Anthropic's own recommended embeddings partner — Anthropic has no embeddings model of its own) were added so an operator without a Gemini key isn't stuck. <b>Gemini's integration is the one that's actually been exercised against real API calls, repeatedly, throughout this project's development. OpenAI's and Voyage's were built from each provider's documented API contract without a live key to test against — the ⚠ on their badge above means exactly that: verify with a real key before trusting the results, the same discipline every other feature here was held to.</b> The 0.95 (dedup) and 0.74 (gap analysis) thresholds below were both measured empirically against Gemini's own similarity distribution; a different provider's embedding space won't necessarily cluster the same way at the same numbers.</p>
-      <p><b>There is no field anywhere in this UI to type a key into</b> — deliberately, since a key like this should never pass through the browser/JS at all. Copy <code>.env.example</code> to <code>.env.local</code> in the project root, set that provider's line (e.g. <code>GEMINI_API_KEY=...</code> — hover a badge above for the exact name), and restart <code>flowscout serve</code>: it's a server-side env var, read once at process startup, so a key added while the server is already running won't show as "set" until it's restarted.</p>
-
-      <h4>Semantic dedup — Enabled</h4>
-      <p>An extra pass after the crawl (needs a key for whichever provider you picked above) that merges flows reading as the same thing even when their exact steps differ. Off by default cost, and the run still fully works without it — just structural + state-convergence dedup only, both free and always on regardless of this setting.</p>
-
-      <h4>Semantic dedup — Similarity threshold</h4>
-      <p>How similar two flows' embeddings must be (cosine, 0–1) before they're called duplicates. Higher = stricter, fewer merges. The 0.95 default was set by testing real flow pairs against Gemini during development, not picked blind — lower thresholds were shown to merge flows that don't even end in the same application state. Not re-verified for OpenAI/Voyage — see Embeddings provider above.</p>
-    </div>
+    <div class="modal-body" id="help-body"></div>
   </div>
 </div>
 
@@ -419,6 +342,162 @@ const API = '';
 let activeRunId = null;
 let pollTimer = null;
 let credRowCount = 0;
+
+// One popup per settings group, not one long scrollable modal -- keyed
+// by the group's own data-help id (see every ".help-trigger" button
+// below), populated into #help-body on demand by the click handler
+// further down. Every settings group has an entry here -- previously
+// five (Credentials, Limits, Safety, Semantic dedup, Gap analysis) had
+// no help entry point at all, and two fields (Max action repeat,
+// Click/select timeout) and the whole Gap analysis group had no
+// documentation anywhere, only found by auditing every field against
+// this object's own coverage.
+const HELP_TOPICS = {
+  'new-run': {
+    title: 'New run',
+    body: `
+      <h4>Load saved config</h4>
+      <p>Prefills every field below from a JSON file in <code>configs/</code>. There's no limit on how many you can save — it's just files in a folder. Selecting <b>— blank —</b> resets the form to defaults. <b>Save current settings as…</b> writes the form to a new (or overwritten) file; the 🗑 button next to the dropdown deletes the selected one. All of this is also just editable by hand in <code>configs/*.json</code> if you prefer a text editor.</p>
+      <h4>Project name</h4>
+      <p>A label only — names the run's folder (<code>runs/&lt;project&gt;-&lt;timestamp&gt;-&lt;id&gt;</code>) and how it shows up in the list. No effect on crawl behavior.</p>
+      <h4>Start URL</h4>
+      <p>Where the crawl begins. Everything discovered has to be reachable by following links from here.</p>
+    `,
+  },
+  'credentials': {
+    title: 'Credentials',
+    body: `
+      <p>Field-name → value pairs. When the crawler finds a form (e.g. a login page), it fills each input by matching a key against the input's <code>name</code>/<code>id</code>/<code>placeholder</code>/<code>data-test</code>/<code>data-testid</code> (all of them together, not just one) — case-insensitive, substring match. So a key of <code>user</code> matches an input named <code>user-name</code> just as well as one named <code>username</code> or marked <code>data-test="username"</code> — but the exact strings <code>user-name</code> and <code>username</code> do NOT match <em>each other</em> (the hyphen makes neither a substring of the other), so a key has to actually match something on the real page, not just look close to it.</p>
+      <h4>🔍 Detect fields from site</h4>
+      <p>Visits the Start URL (a real, read-only page load) and shows the real name/id/placeholder/data-test values it finds, instead of you guessing what the site actually calls them. Fields that don't match anything entered here still get a synthetic safe value at crawl time (e.g. <code>flowscout_test</code>) — never left blank, never guessed from the page.</p>
+    `,
+  },
+  'limits': {
+    title: 'Limits',
+    body: `
+      <h4>Max depth</h4>
+      <p>The longest chain of steps a single flow can take from the start page. Doesn't limit how many different flows get explored — only how deep any one of them goes.</p>
+      <h4>Max breadth / state</h4>
+      <p>How many candidate actions the crawler will try from one discovered page, out of everything it finds there. Extras beyond this are skipped ("breadth limit exceeded" in the report) — in practice the most common reason a real, visible button never gets clicked, especially when a site's header/footer repeats on every page and crowds out page-specific content ahead of it. Raise this if a run's report shows a lot of breadth-limit skips on pages you care about.</p>
+      <h4>Max states / Max flows</h4>
+      <p>Whole-run budgets: total distinct application states discovered, and total paths walked (unique + duplicate together), before the crawl stops.</p>
+      <h4>Max repeats of the same action</h4>
+      <p>Caps how many times the same normalized action (e.g. "add to cart" on different products) can be followed within one flow. A third repeat rarely teaches the crawler anything a second one didn't — this bounds the combinatorial state growth that repeated mutating actions cause (an N-item cart is up to 2<sup>N</sup> reachable states) without needing a blanket depth limit.</p>
+      <h4>Click/select timeout (seconds)</h4>
+      <p>How long to wait for a click or select to succeed before giving up. 8s is enough for most sites, but a slower or heavier real production deploy (not a local test fixture) can genuinely need more — found on a live crawl where many flows failed with "Timeout 8000ms exceeded" on a site that was simply slower than that, not broken. Raise this before raising Max depth/Max flows if errors look like this.</p>
+    `,
+  },
+  'safety': {
+    title: 'Safety',
+    body: `
+      <p>Every candidate action the crawler finds gets one of three risk tiers before it's ever clicked — this is what these three fields actually control.</p>
+      <table>
+        <tr><th>Tier</th><th>Meaning</th><th>Followed?</th></tr>
+        <tr><td><b>safe</b></td><td>navigation — links, opening menus, viewing pages</td><td>always</td></tr>
+        <tr><td><b>mutating</b></td><td>changes state — add to cart, checkout, submit, purchase…</td><td>only if <code>allow_mutating</code> is on</td></tr>
+        <tr><td><b>destructive</b></td><td>logout, leaving the allowed domain(s), an excluded page</td><td>never — no toggle overrides this</td></tr>
+      </table>
+      <h4>Allow mutating actions</h4>
+      <p>Off by default. When off, only <b>safe</b> actions are ever clicked. Turn this on when you're fine with the crawler actually performing add-to-cart/checkout/submit-style actions on the target — safe on a demo/QA site with fake data, risky on a site with a real payment processor wired up.</p>
+      <h4>Allowed domains</h4>
+      <p>The crawl never navigates outside these domains, regardless of the toggle above — anything pointing elsewhere is <b>destructive</b> and skipped, no exceptions.</p>
+      <h4>Exclude URL patterns</h4>
+      <p>Glob patterns (e.g. <code>*/privacy*</code>) for pages you never want visited — legal pages, social links, anything not worth the crawl budget or not safe to touch. Same treatment as an external domain: always <b>destructive</b>, independent of the mutating toggle. Doesn't apply to in-page anchors (e.g. <code>#faq</code>) — only real page navigations have a path to match against.</p>
+    `,
+  },
+  'embeddings-provider': {
+    title: 'Embeddings provider',
+    body: `
+      <p>Both Semantic dedup and Gap analysis need a text-embeddings API call to compare flows/test cases by meaning, not just exact text. Gemini was the only option originally; OpenAI and Voyage AI (Anthropic's own recommended embeddings partner — Anthropic has no embeddings model of its own) were added so an operator without a Gemini key isn't stuck. <b>Gemini's integration is the one that's actually been exercised against real API calls, repeatedly, throughout this project's development. OpenAI's and Voyage's were built from each provider's documented API contract without a live key to test against — the ⚠ on their badge above means exactly that: verify with a real key before trusting the results, the same discipline every other feature here was held to.</b> The 0.95 (dedup) and 0.74 (gap analysis) thresholds were both measured empirically against Gemini's own similarity distribution; a different provider's embedding space won't necessarily cluster the same way at the same numbers.</p>
+      <p><b>There is no field anywhere in this UI to type a key into</b> — deliberately, since a key like this should never pass through the browser/JS at all. Copy <code>.env.example</code> to <code>.env.local</code> in the project root, set that provider's line (e.g. <code>GEMINI_API_KEY=...</code> — hover a badge above for the exact name), and restart <code>flowscout serve</code>: it's a server-side env var, read once at process startup, so a key added while the server is already running won't show as "set" until it's restarted.</p>
+    `,
+  },
+  'semantic-dedup': {
+    title: 'Semantic dedup',
+    body: `
+      <h4>Enabled</h4>
+      <p>An extra pass after the crawl (needs a key for whichever provider is picked under Embeddings provider) that merges flows reading as the same thing even when their exact steps differ. On by default; the run still fully works without it — just structural + state-convergence dedup only, both free and always on regardless of this setting.</p>
+      <h4>Similarity threshold</h4>
+      <p>How similar two flows' embeddings must be (cosine, 0–1) before they're called duplicates. Higher = stricter, fewer merges. The 0.95 default was set by testing real flow pairs against Gemini during development, not picked blind — lower thresholds were shown to merge flows that don't even end in the same application state. Not re-verified for OpenAI/Voyage.</p>
+    `,
+  },
+  'personas': {
+    title: 'Additional personas',
+    body: `
+      <p>Crawls the same site again as a different logged-in user, one persona after another (not in parallel — two personas can corrupt each other's results through shared server-side state, e.g. one resetting cart contents mid-crawl while another is still using them), all written into <b>one</b> report. Flows are kept separate per persona even when they look identical otherwise — an admin-only page an admin can reach and a standard user can't never collapses into "the same flow" just because the destination matches. Each persona gets the same Max states / Max flows budget the crawl would give a single persona, not a shared pool that a later persona could get starved out of. Leave this empty to crawl as just the one persona defined in Credentials (the default, and the only behavior before this existed).</p>
+    `,
+  },
+  'variant': {
+    title: 'Configuration label (variant)',
+    body: `
+      <p>Names <b>which configuration of the app</b> a run covers — one customer/tenant, one feature-flag set, one environment. It changes nothing about how the crawl itself runs; it scopes the durable project state that <b>change detection</b> compares against (<code>projects/&lt;project&gt;/variants/&lt;variant&gt;/state.json</code>). Without it, crawling customer A and then customer B under the same project name diffs B against A's baseline: every flow unique to A reads as &ldquo;missing since last run&rdquo; and every flow unique to B as &ldquo;new&rdquo;, when nothing actually changed in either system. Leave it blank for a single-configuration project — that keeps the original, unscoped state file, exactly as before this existed.</p>
+    `,
+  },
+  'seed-urls': {
+    title: 'Direct URL seeding',
+    body: `
+      <p>The crawler otherwise only ever finds what it can click its way to from Start URL — a page with no inbound link anywhere in the crawled UI (a deep-linked SPA route, an old landing page still live but delisted from navigation) is invisible no matter how thoroughly the rest of the app gets explored.</p>
+      <h4>Sitemap URL</h4>
+      <p>Fetched and parsed automatically (a plain sitemap, or a sitemap index of child sitemaps, recursed one level).</p>
+      <h4>Additional seed URLs</h4>
+      <p>A plain list you already know about. Either way, each one is explored with the crawler's full normal logic from there onward, not just visited once and left alone — reported as its own "Open URL directly" flow, plus whatever it leads to. Filtered exactly like an ordinary link: dropped if outside Allowed domains, dropped if it matches an Exclude URL pattern, dropped if it's just Start URL itself. Capped at 50 seed URLs by default (a real sitemap can list thousands; raise it with <code>max_seed_urls</code> in a JSON config if you actually want that).</p>
+    `,
+  },
+  'gap-analysis': {
+    title: 'Gap analysis',
+    body: `
+      <p>Compares this run's own discovered flows against a test-case export (TestRail, Zephyr, Xray, qTest, or any CSV with an id/title/steps-shaped column) and reports each flow as covered, partially covered, or a gap — plus which of your test cases the crawl never touched at all. Needs an embeddings provider key (see Embeddings provider) to compare by meaning rather than exact text; without one every TCMS item is reported as unmatched instead.</p>
+      <h4>TCMS CSV</h4>
+      <p>Attach it now so this run's report has flows AND gap analysis together as soon as it finishes — no second step after. Leave empty to just crawl; a TCMS can still be uploaded afterward from a run's own detail page.</p>
+      <h4>Gap threshold</h4>
+      <p>How similar a flow's embedding must be to a TCMS item's before they're considered a match (cosine, 0–1). Leave blank to use the server's own default (0.74, calibrated against Gemini — see Embeddings provider). Lower catches more matches but risks false positives; higher is stricter.</p>
+    `,
+  },
+  'handoff': {
+    title: 'Multi-actor handoff scenario',
+    body: `
+      <p>For a workflow no single autonomous persona can complete alone — e.g. an admin has to approve a request a different, ordinary user just submitted, and then that SAME user needs to come back and continue. Adding at least one step here replaces the ordinary crawl with a scripted scenario: each step runs as a named persona (matching one from Additional personas, or <code>"default"</code>), in order.</p>
+      <h4>Mode</h4>
+      <p><b>Direct URL:</b> navigate straight to a known address (supports <code>{name}</code> placeholders from an earlier step's own Capture). <b>Find (search):</b> a bounded, genuinely autonomous search from "search from" (default: Start URL) for the first state whose URL/title/or any candidate's own label contains "contains" — the answer to "how does the crawler know where in the admin's own menus to find this one specific thing" without being told the exact URL. If the match is on a listing page's own link rather than the target page itself, that one link is followed automatically before the step's Action is looked for. A search that can't find anything within this run's own Limits is recorded as a real finding (a checkpoint), not silently skipped.</p>
+      <h4>Storage state to resume</h4>
+      <p>Leave blank for an ordinary fresh session. Set to <code>{name}</code> to resume the EXACT live session an earlier step's <b>Capture session as</b> saved — e.g. the same now-approved user account, not just a fresh login as "the same persona".</p>
+      <h4>Action to click</h4>
+      <p>Optional — the exact label of a candidate to click once this step's landing state is reached (e.g. <code>Approve</code>). Matched by label, not position, so a layout change between runs can't silently click the wrong thing.</p>
+      <h4>Capture</h4>
+      <p>Extracts a value from this step's own resulting URL via a regex (e.g. <code>/requests/(\\d+)/confirmation</code> captures the id), for a LATER step to reference as <code>{name}</code> in its own Seed URL / Find fields.</p>
+      <h4>Capture session as</h4>
+      <p>Saves this step's own persona's live logged-in session under a name, for a LATER step's Storage state field to resume.</p>
+      <h4>Explore normally from here</h4>
+      <p>Hands off into a full, ordinary crawl (this run's usual Limits) from this step's landing state, merging everything it finds into the same report — the answer to "the now-approved user logs in and just keeps crawling normally".</p>
+      <h4>Known limitation</h4>
+      <p>Nothing here can read an email inbox. A step gated behind "click the link we emailed you" cannot be automated — the scenario stalls at the following step and reports it honestly as a checkpoint, rather than faking a click that never happened.</p>
+    `,
+  },
+  'mock-clock': {
+    title: 'Mock clock',
+    body: `
+      <p>Gets past a control gated behind client-side time — a "resend code in 00:30" cooldown, an "available starting &lt;date&gt;" check. Two <b>independent</b> Playwright Clock API mechanisms, verified live to NOT substitute for each other.</p>
+      <h4>Start at</h4>
+      <p>(<code>page.clock.install(time=...)</code>, before the page loads) answers a <code>Date.now()</code>/<code>new Date()</code> comparison against an absolute deadline, checked once at load — fast-forwarding afterward does nothing for this case, since the check already ran.</p>
+      <h4>Fast forward</h4>
+      <p>(<code>page.clock.fast_forward(...)</code>, applied once right after the page's own initial load) answers a <code>setTimeout</code>/<code>setInterval</code>-scheduled cooldown — pre-setting a future start date does nothing for this case, since a timer scheduled at load always waits its own full duration regardless of what date it thinks it is. A real site can use either pattern; set whichever one matches what you know about the target, or both. Accepts a friendly <code>"&lt;N&gt;&lt;unit&gt;"</code> duration (<code>s</code>/<code>m</code>/<code>h</code>/<code>d</code>, e.g. <code>30d</code>), raw milliseconds, or Playwright's own <code>"HH:MM:SS"</code> form. Only ever touches client-side JavaScript timing — a real timestamp checked by the app's own backend is unreachable from outside the browser, and this can't do anything about it.</p>
+    `,
+  },
+  'excursion': {
+    title: 'Third-party excursions',
+    body: `
+      <p>Any navigation off <code>allowed_domains</code> is normally <b>destructive</b> and never followed — a payment gateway, an OAuth/SSO provider, or a billing portal would otherwise be structurally invisible. Listing a domain here (wildcards allowed, e.g. <code>*.stripe.com</code>) approves it specifically, with a much narrower budget than the app itself gets: breadth capped low (default 1 — follow one path through, don't branch into the third party's own marketing pages) and depth capped independently of the app's own Max depth (default 4 — a real integration is typically a handful of screens). Once back in <code>allowed_domains</code>, both caps reset and ordinary exploration resumes. Only a real progression control (a form's own button/input, or one matching a "pay"/"continue"/"confirm"-style action) is ever tried there — never a plain link, which is exactly the "wander to another page" affordance this is built to avoid.</p>
+    `,
+  },
+  'payment-sandbox': {
+    title: 'Payment sandbox testing',
+    body: `
+      <p>A task-specific grouping over the SAME two mechanisms Third-party excursions and Credentials already provide — not a new concept underneath. Checking <b>Enable</b> merges <b>Sandbox domain(s)</b> straight into <code>excursion_domains</code>, and <b>Card / billing data</b> straight into whichever persona's <code>credentials</code> would otherwise be used — matched the exact same field-name-substring way a login username/password already is. Deliberately provider-agnostic: FlowScout has no built-in knowledge of Stripe, PayPal, Braintree, or any other gateway's own test-mode conventions. Put whatever YOUR configured sandbox expects — a Stripe test card (<code>4242 4242 4242 4242</code>), a generic Visa test number (<code>4222222222222</code>), or anything else — as field name → value pairs, the same as any other credential.</p>
+      <h4>Known limitation, verified live, not just assumed</h4>
+      <p>This only works for a gateway's own <b>hosted, redirect-based</b> checkout page (Stripe Checkout, PayPal's own hosted flow — the whole page belongs to the provider's domain). A gateway <b>embedded as an iframe widget on the merchant's own page</b> (Stripe Elements and similar) is NOT reachable this way — the card field lives inside a separate document, and FlowScout's form-filling walks up the DOM from the submit button (<code>.closest()</code>/<code>.parentElement</code>), which can't cross into a nested iframe's own document at all. On that style of integration, the crawler will click "Pay" having never written anything into the card field, and the gateway's own client-side validation stops it right there — a real, disclosed gap, not silently papered over. Even on a page this DOES reach, a wrong or malformed test value still won't pass the gateway's own client-side format validation (Luhn check, recognized test-card patterns) — this only gets you as far as your own sandbox data is actually valid for that provider.</p>
+    `,
+  },
+};
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -1165,19 +1244,18 @@ function selectRun(runId) {
 
 document.querySelectorAll('.help-trigger').forEach(btn => {
   btn.onclick = (e) => {
-    // Several of these now sit inside a <details><summary> (the
-    // collapsible setting groups) -- without this, the click would
-    // ALSO toggle the group open/closed as the browser's own default
-    // action for a click landing on a summary, alongside opening the
-    // help modal.
+    // Several of these sit inside a <details><summary> (the collapsible
+    // setting groups) -- without this, the click would ALSO toggle the
+    // group open/closed as the browser's own default action for a
+    // click landing on a summary, alongside opening the help popup.
     e.preventDefault();
     e.stopPropagation();
+    const topic = HELP_TOPICS[btn.dataset.help];
+    if (!topic) return;  // shouldn't happen -- every help-trigger carries a real data-help key
+    document.getElementById('help-title').textContent = topic.title;
+    document.getElementById('help-body').innerHTML = topic.body;
     document.getElementById('help-overlay').style.display = 'flex';
-    const anchorId = btn.dataset.help;
-    if (anchorId) {
-      const anchor = document.getElementById('help-' + anchorId);
-      if (anchor) anchor.scrollIntoView({block: 'start'});
-    }
+    document.querySelector('.modal-body').scrollTop = 0;
   };
 });
 document.getElementById('help-close').onclick = () => { document.getElementById('help-overlay').style.display = 'none'; };
