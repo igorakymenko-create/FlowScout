@@ -1110,20 +1110,25 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
             is_choice=True, choice_group=group,
         ), None
 
-    sig_key = el["dataTest"] or el["id"] or f"{el['tag']}:{el['text']}"
+    # An auto-generated id (see id_looks_generated) is neither a stable
+    # locator nor a stable signature -- treated as if the element had no
+    # id at all, so it falls back to its text/href/tag like any other
+    # id-less element, or is reported as unlocatable below.
+    stable_id = "" if id_looks_generated(el["id"]) else el["id"]
+    sig_key = el["dataTest"] or stable_id or f"{el['tag']}:{el['text']}"
     signature = f"data-test:{sig_key}" if el["dataTest"] else (
-        f"id:{sig_key}" if el["id"] else f"text:{sig_key}"
+        f"id:{sig_key}" if stable_id else f"text:{sig_key}"
     )
     if signature in seen:
         return None, None
     seen.add(signature)
-    label = el["text"] or el["dataTest"] or el["id"] or el["tag"]
+    label = el["text"] or el["dataTest"] or stable_id or el["tag"]
     if el.get("occluded"):
         return None, {
             "label": describe_action(el, None),
             "reason": f"obstructed by another element ({el.get('occludedBy') or 'unknown'}) at click point",
         }
-    if not (el.get("dataTest") or el.get("id") or el.get("href") or el.get("text")):
+    if not (el.get("dataTest") or stable_id or el.get("href") or el.get("text")):
         # build_locator()'s only remaining option for THIS element would be
         # page.get_by_text(el["text"], exact=True) with an EMPTY string --
         # found on a real crawl (alternateqa.com, an icon-only button with
@@ -1137,10 +1142,12 @@ def _build_candidate(el: dict, via: str, current_domain: str, allowed_domains: l
         # resolve to the wrong element.
         return None, {
             "label": describe_action(el, None),
-            "reason": "no reliable locator for this element (no data-test/id/href/visible text) "
-                      "-- skipped rather than risk clicking the wrong element",
+            "reason": ("no reliable locator for this element (its only identifier, an id, looks "
+                       "auto-generated and changes on every page load)" if el.get("id") else
+                       "no reliable locator for this element (no data-test/id/href/visible text)")
+                      + " -- skipped rather than risk clicking the wrong element",
         }
-    norm_signature = normalize_signature(el["dataTest"] or el["id"] or el["text"] or el["tag"])
+    norm_signature = normalize_signature(el["dataTest"] or stable_id or el["text"] or el["tag"])
     risk, reason = classify(label, el["href"] or None, current_domain, allowed_domains, exclude_patterns, excursion_domains)
     return ElementCandidate(
         signature=signature, norm_signature=norm_signature, label=label,
@@ -1306,7 +1313,7 @@ def build_locator(page, el_meta: dict):
         scope = page.frame(url=frame_url) or page
     if el_meta.get("dataTest"):
         return scope.locator(f'[data-test="{el_meta["dataTest"]}"]').first
-    if el_meta.get("id"):
+    if el_meta.get("id") and not id_looks_generated(el_meta["id"]):
         return scope.locator(f'#{el_meta["id"]}').first
     if el_meta.get("tag") == "radio":
         # Structural (type+name+value), not text: radio labels are often
@@ -1395,6 +1402,76 @@ def _closest_form_like_handle(page, el_meta: dict):
         return None
 
 
+_NON_SUBMIT_TAGS = {"li", "ul", "ol", "canvas", "svg"}
+
+
+def _is_non_submit_control_in_loose_container(container, el_meta: dict) -> bool:
+    """True when `el_meta` can't plausibly be a form's submit control AND
+    the "form" it was matched to is only closestFormLike()'s loose
+    fallback (an ancestor that merely CONTAINS some input), not a real
+    <form>. Found live on OrangeHRM (reported by a LinkedIn user's run,
+    reproduced against the public demo): the sidebar menu holds a Search
+    box, so every menu link -- and the user-dropdown -- counted as
+    "submitting" that sidebar. Clicking "Admin" first typed
+    "flowscout_test" into the Search box, which filters the menu live,
+    which removed the very link about to be clicked: Locator.click
+    timed out on Admin, PIM, Leave... every time, and the crawl spent
+    its budget on the resulting error flows.
+
+    A navigational link (a real href), a list item, or a graphic
+    (canvas/svg) never submits anything -- a form is submitted by a
+    button-like control. A real <form> is left alone entirely (a link
+    inside one is still rare but not this bug), and so is an <a> with no
+    real href (`href="#"`, `javascript:` -- a common "submit link")."""
+    tag = (el_meta.get("tag") or "").lower()
+    href = (el_meta.get("href") or "").strip()
+    if tag == "a":
+        looks_navigational = bool(href) and href != "#" and not href.lower().startswith("javascript:")
+        if not looks_navigational:
+            return False
+    elif tag not in _NON_SUBMIT_TAGS:
+        return False
+    try:
+        return not container.evaluate("e => e.tagName.toLowerCase() === 'form'")
+    except Exception:
+        return False
+
+
+_ID_INTERLEAVED_DIGIT_RE = re.compile(r"[A-Za-z][0-9][A-Za-z]")
+_ID_LOWER_WORD_RE = re.compile(r"[a-z]{4,}")
+_ID_CAMEL_WORD_RE = re.compile(r"[A-Z]?[a-z]{2,}")
+
+
+def id_looks_generated(value: str) -> bool:
+    """Whether an element `id` looks machine-generated per page load
+    (a chart library's `xyKbEpDm`, `A3RHS-sP`) rather than authored.
+    Such an id is a poisonous locator AND a poisonous signature: a fresh
+    browser context re-rolls it, so a replay's `#id` selector times out
+    and the same state fingerprints differently on every visit (found
+    live on OrangeHRM: dashboard chart <canvas> elements produced 4 of a
+    reported run's 5 click timeouts, plus phantom duplicate states).
+
+    A shape heuristic, deliberately conservative -- 6..16 characters of
+    [A-Za-z0-9_-] only, and either (a) a digit sandwiched between
+    letters (`Yw9o2G97`), or (b) mixed case with no camelCase words
+    (`rEcis_IZ`, `THYtyqxh`). Ordinary authored ids (`user-name`,
+    `shopping_cart_link`, `loginButton`, `getUserId`, `btnSubmit2`) are
+    exempt: single-case, hyphen/underscore-separated words, or at least
+    two real camelCase words. A rare false positive only demotes the id
+    below href/text in build_locator, or reports an id-only element as
+    "no reliable locator" -- visible in the report, never a silent skip."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,16}", value or ""):
+        return False
+    if _ID_INTERLEAVED_DIGIT_RE.search(value):
+        return True
+    if not (re.search(r"[a-z]", value) and re.search(r"[A-Z]", value)):
+        return False
+    if any(re.search(r"[aeiou]", run) for run in _ID_LOWER_WORD_RE.findall(value)):
+        return False
+    words = [w for w in _ID_CAMEL_WORD_RE.findall(value) if re.search(r"[aeiouAEIOU]", w)]
+    return len(words) < 2
+
+
 def fill_enclosing_form(page, el_meta: dict, credentials: dict) -> dict | None:
     """Best-effort: fill every visible input/select/textarea in the form
     (or form-LIKE container -- see _closest_form_like_handle) that
@@ -1416,6 +1493,8 @@ def fill_enclosing_form(page, el_meta: dict, credentials: dict) -> dict | None:
     container = _closest_form_like_handle(page, el_meta)
     if container is None:
         return {}
+    if _is_non_submit_control_in_loose_container(container, el_meta):
+        return None
     if el_meta.get("type") == "button":
         # type="button" is ambiguous on its own -- inside a REAL <form>
         # it's very likely a genuine Cancel/decorative control (the

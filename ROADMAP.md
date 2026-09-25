@@ -5626,3 +5626,72 @@ testing.
 
 All 33 existing tests still pass; no leftover Playwright/headless-
 Chromium processes.
+
+## OrangeHRM residual: two real crawler bugs behind "deep SPA nav blocks" (done, Sep 2026)
+
+A LinkedIn user re-ran FlowScout 0.4.0 on their own OrangeHRM instance
+(after the earlier auth-wall/SPA-render fixes) and reported a residual:
+"deep SPA nav still blocks -- Admin/PIM sections error, everything else
+crawls clean", with `flows.json` in a gist. The framing pointed at SPA
+navigation; the data pointed somewhere else, so it was reproduced
+before anything was touched. Their config was small (`max_depth 2,
+max_breadth 6, max_states 15, max_flows 15`), which matters below.
+
+**What the logs actually showed.** 4 of the 5 click errors were on
+`canvas` elements whose only locator was `#xyKbEpDm`-style ids; the
+fifth was `Open "Admin"` timing out on a plain sidebar link. And 8 of
+the 12 discovered states were the same dashboard URL under different
+fingerprints -- so the small `max_states` budget was being spent on
+phantom duplicates, never reaching Admin/PIM at all.
+
+**Reproduced against the public OrangeHRM demo** with their exact
+limits: the same random `#A3RHS-sP`-style canvas ids, and
+`Open "Admin"`/`"PIM"`/`"Leave"` all timing out after a first
+dashboard click. A manual Playwright replay of the identical two-step
+path found the Admin link present 500ms after the click -- so it was
+not SPA timing. Two separate, independent causes:
+
+1. **Auto-generated ids used as locators and as signatures.** A chart
+   library re-rolls its canvas ids (8 random characters) on every page
+   load. A fresh replay context can never find `#id` again -> click
+   timeout, and because `id:xyKbEpDm` fed `state_fingerprint()`, the
+   same dashboard fingerprinted differently on every visit -> phantom
+   duplicate states. New `id_looks_generated()` (`actions.py`): a
+   conservative shape heuristic (6-16 chars of `[A-Za-z0-9_-]`, then a
+   digit sandwiched between letters, or mixed case with no real
+   camelCase words). A generated id is treated as if the element had
+   none: `build_locator` falls through to href/text, the signature
+   uses text/tag, and an element with nothing else is reported in the
+   Safety register as "no reliable locator (its only identifier, an id,
+   looks auto-generated...)" instead of a doomed candidate. Ten real
+   ids from the two runs are all detected; eighteen ordinary authored
+   ids (`user-name`, `loginButton`, `getUserId`, `btnSubmit2`,
+   `dropDownMenu`, ...) are all left alone -- 28 new tests.
+2. **Any link in a "form-like" container counted as submitting it.**
+   The sidebar holds a Search box, so `closestFormLike()`'s loose
+   fallback (nearest ancestor merely *containing* an input) made every
+   menu link and the user dropdown a "submit control". Clicking "Admin"
+   first typed `flowscout_test` into Search -- which filters the menu
+   live and removes the very link about to be clicked. Confirmed
+   directly: filling that box takes the sidebar from 12 items to 0.
+   `fill_enclosing_form` now returns "not a submission" for a
+   navigational `<a href>`, or an `li`/`ul`/`ol`/`canvas`/`svg`, whose
+   container is only the loose fallback and not a real `<form>`. A
+   real `<form>`, and an `<a href="#">`/`javascript:` "submit link",
+   are deliberately left alone.
+
+**Verified live, same crawl before/after (public demo, their limits):**
+checkpoints 6 -> 3 (one of them the ordinary `max_flows` stop); random
+canvas-id candidates 6 -> 0; `/admin/viewSystemUsers`,
+`/pim/viewEmployeeList` and `/leave/viewLeaveList` went from never
+reached to discovered states; flows 4-6 (`Open Admin/PIM/Leave`) went
+from error-terminated to ordinary max_depth-truncated, resumable ones.
+
+**Not fixed, stated plainly:** the two remaining errors are
+`Toggle "checkbox"` on OrangeHRM's nameless custom checkboxes
+(`input[type=checkbox][name=""]` matches a hidden native input) -- a
+different, pre-existing locator gap, not part of the report. Also,
+`Click "(1) Candidate to Interview"` is a data-driven label (the
+"(1)" is a live count) and can vary between loads on a shared demo.
+
+Saucedemo regression and the full test suite: see the commit.
