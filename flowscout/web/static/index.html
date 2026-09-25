@@ -402,7 +402,7 @@ const HELP_TOPICS = {
       <h4>Allow mutating actions</h4>
       <p>Off by default. When off, only <b>safe</b> actions are ever clicked. Turn this on when you're fine with the crawler actually performing add-to-cart/checkout/submit-style actions on the target — safe on a demo/QA site with fake data, risky on a site with a real payment processor wired up.</p>
       <h4>Allowed domains</h4>
-      <p>The crawl never navigates outside these domains, regardless of the toggle above — anything pointing elsewhere is <b>destructive</b> and skipped, no exceptions.</p>
+      <p>The crawl never navigates outside these domains, regardless of the toggle above — anything pointing elsewhere is <b>destructive</b> and skipped, no exceptions. An entry without a port (<code>localhost</code>, <code>example.com</code>) allows that host on <b>any</b> port; add one (<code>localhost:8080</code>) to allow only that exact host:port. The Start URL's own domain has to be covered here, or the whole app reads as an off-app excursion — the report flags this at the top if it happens.</p>
       <h4>Exclude URL patterns</h4>
       <p>Glob patterns (e.g. <code>*/privacy*</code>) for pages you never want visited — legal pages, social links, anything not worth the crawl budget or not safe to touch. Same treatment as an external domain: always <b>destructive</b>, independent of the mutating toggle. Doesn't apply to in-page anchors (e.g. <code>#faq</code>) — only real page navigations have a path to match against.</p>
     `,

@@ -5695,3 +5695,49 @@ different, pre-existing locator gap, not part of the report. Also,
 "(1)" is a live count) and can vary between loads on a shared demo.
 
 Saucedemo regression and the full test suite: see the commit.
+
+## `allowed_domains: ["localhost"]` stopped matching an app on localhost:8080 (done, Sep 2026)
+
+Found by the same LinkedIn user's re-test on v0.6.1: a config that
+worked on 0.4.0 (`allowed_domains: ["localhost"]`, app on
+`localhost:8080`) collapsed to 2 states / 1 flow on a newer version.
+Their diagnosis was exact and checked against the code before trusting
+it: `actions.current_domain()` returns `urlsplit(url).netloc`, which
+includes the port, and the comparison against `allowed_domains` was an
+exact string match -- so `"localhost"` never equalled `"localhost:8080"`.
+
+**Why it only broke later.** Before excursion handling (0.5.0) the
+comparison only ever ran on ABSOLUTE hrefs pointing at another host,
+so an app's own relative links never hit it. `_discover_state()` then
+began marking a state `external_domain` when its domain wasn't allowed
+-- and the start page itself, on a port the entry didn't name, was
+"external": every candidate got the narrow excursion budget and the
+crawl stopped after a state or two, with nothing saying why.
+
+**Reproduced first** on a local two-port fixture: `allowed_domains:
+["127.0.0.1:8996"]` -> 3 states / 4 flows; `["127.0.0.1"]` -> 1 state /
+0 flows, start page marked external.
+
+**Fix (`risk.domain_allowed()`, used at all three comparison sites --
+`risk.classify`, `_discover_state`, seed-URL filtering):** an entry
+WITHOUT a port allows that host on any port; an entry WITH one allows
+exactly that host:port. Case-insensitive; userinfo dropped; IPv6
+brackets handled. Deliberately not wildcard matching -- `saucedemo.com`
+still does not allow `www.saucedemo.com`. A consequence worth knowing:
+a bare `localhost` now also allows a different local service on
+another port; add the port to restrict.
+
+**And the silent failure itself is no longer silent.** A start_url
+whose own domain isn't allowed (a typo, or a config predating this)
+now adds an error checkpoint at the top of the report -- "start_url's
+domain 'X' is not in allowed_domains -- the whole app will read as
+external" -- naming the fix. The crawl proceeds unchanged; it is
+skipped when the domain is also an approved excursion domain. The
+Allowed domains help popup now states the port rule.
+
+**Verified live:** the same fixture, bare host, 1 state -> 3 states,
+nothing marked external; the warning fires for `["exampel.com"]` and is
+silent for a correct config. 15 new tests (matching matrix incl. the
+reported case, IPv6, userinfo, case; classify keeps blocking a
+different host). Saucedemo regression and the full suite: see the
+commit.

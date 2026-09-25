@@ -37,7 +37,7 @@ from .fingerprint import normalize_url, state_fingerprint
 from .models import (
     Checkpoint, ElementCandidate, Flow, FlowStatus, Risk, RunResult, StateNode, Transition,
 )
-from .risk import _MUTATING_KEYWORDS
+from .risk import _MUTATING_KEYWORDS, domain_allowed
 from .semantic_dedup import DEFAULT_THRESHOLD, apply_semantic_dedup
 
 
@@ -177,7 +177,7 @@ def _resolve_seed_urls(config: dict, allowed_domains: list[str], run: RunResult)
         if normalize_url(u) == start_norm:
             continue
         domain = current_domain(u)
-        if domain and domain not in allowed_domains and domain != start_domain:
+        if domain and not domain_allowed(domain, allowed_domains) and domain != start_domain:
             continue
         path = urlsplit(u).path or u
         if any(fnmatch(path, p) for p in exclude_patterns):
@@ -222,7 +222,7 @@ def _discover_state(page, allowed_domains, run: RunResult
     # domain is DESTRUCTIVE in risk.classify() and never gets clicked in
     # the first place, so discovery never runs against it). See
     # StateNode.external_domain's own docstring for what this is used for.
-    external_domain = domain if domain not in allowed_domains else ""
+    external_domain = "" if domain_allowed(domain, allowed_domains) else domain
     candidates, occluded, unclassified, disabled, validation_signals, captcha_signals = discover_candidates(
         page, domain, allowed_domains, exclude_patterns, excursion_domains)
     if not candidates and not occluded and not unclassified:
@@ -1062,6 +1062,30 @@ def _apply_payment_sandbox(config: dict) -> dict:
     return new_config
 
 
+def _warn_if_start_url_not_allowed(run: RunResult, config: dict) -> None:
+    """A start_url whose own domain isn't in allowed_domains (a typo, a
+    forgotten port on a config written before ports were matched
+    strictly) makes the ENTIRE app read as an external excursion, and
+    the crawl quietly collapses to a state or two with nothing saying
+    why -- reported by a user whose `["localhost"]` config stopped
+    matching an app on localhost:8080. Surfaced as a checkpoint at the
+    top of the report; the crawl itself proceeds unchanged. Silent when
+    the domain is also an approved excursion domain (deliberate)."""
+    domain = current_domain(config["start_url"])
+    allowed = config.get("allowed_domains", [])
+    if not domain or domain_allowed(domain, allowed):
+        return
+    if any(fnmatch(domain, pattern) for pattern in config.get("excursion_domains", [])):
+        return
+    run.checkpoints.append(Checkpoint(
+        kind="error", flow_id=None, state_fp=None,
+        message=f"start_url's domain '{domain}' is not in allowed_domains -- the whole app will read as external",
+        detail=f"allowed_domains is {allowed!r}. Add '{domain}' (or just the host, which matches any port) "
+               f"to allowed_domains; until then every page counts as an off-app excursion and the crawl "
+               f"will stop after a state or two.",
+    ))
+
+
 def crawl(config: dict) -> RunResult:
     config = _apply_payment_sandbox(config)
     from playwright.sync_api import sync_playwright
@@ -1118,6 +1142,7 @@ def crawl(config: dict) -> RunResult:
         personas = [{"name": "default", "credentials": config.get("credentials", {})}]
 
     run = RunResult(project=config["project"], start_url=config["start_url"], config=config)
+    _warn_if_start_url_not_allowed(run, config)
     run.started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     # Direct-URL seeding (see _resolve_seed_urls's own docstring) --

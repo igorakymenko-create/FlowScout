@@ -38,6 +38,37 @@ _MUTATING_KEYWORDS = [
 ]
 
 
+def _split_netloc(netloc: str) -> tuple[str, str]:
+    """(lowercased host, port or "") from a URL netloc or an
+    allowed_domains entry -- userinfo dropped, IPv6 brackets respected."""
+    hostport = (netloc or "").strip().lower().rpartition("@")[2]
+    if hostport.startswith("["):
+        host, _, rest = hostport[1:].partition("]")
+        return host, rest.lstrip(":")
+    host, sep, port = hostport.rpartition(":")
+    if sep and port.isdigit():
+        return host, port
+    return hostport, ""
+
+
+def domain_allowed(netloc: str, allowed_domains: list[str]) -> bool:
+    """Whether `netloc` (a URL's host[:port]) falls inside
+    `allowed_domains`. An entry WITHOUT a port ("localhost",
+    "example.com") allows that host on any port; an entry WITH one
+    ("localhost:8080") allows exactly that host:port. Found on a real
+    run: `["localhost"]` stopped matching an app on localhost:8080 once
+    excursion handling started comparing the full netloc (port included)
+    to the entry exactly -- the start page itself read as an external
+    excursion and the whole crawl collapsed to 1-2 states, silently.
+    Case-insensitive, like hostnames are."""
+    host, port = _split_netloc(netloc)
+    for entry in allowed_domains:
+        entry_host, entry_port = _split_netloc(entry)
+        if entry_host == host and (not entry_port or entry_port == port):
+            return True
+    return False
+
+
 def _domain_matches_excursion(domain: str, patterns: list[str]) -> bool:
     """Wildcard-aware match against an operator-approved excursion
     allowlist (e.g. "*.stripe.com" matching "checkout.stripe.com") --
@@ -79,7 +110,7 @@ def classify(label: str, href: str | None, current_domain: str,
         except Exception:
             parts = None
             target_domain = ""
-        if target_domain and target_domain not in allowed_domains and target_domain != current_domain:
+        if target_domain and not domain_allowed(target_domain, allowed_domains) and target_domain != current_domain:
             if excursion_domains and _domain_matches_excursion(target_domain, excursion_domains):
                 excursion_match = target_domain
             else:
