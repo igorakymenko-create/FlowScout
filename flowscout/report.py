@@ -443,6 +443,25 @@ def _gap_section_html(gap: GapAnalysis | None, run: RunResult) -> str:
       <th>Matched flow</th><th class="num">Score</th><th>Source</th></tr></thead><tbody>{rows}</tbody></table></div>
   </details>"""
 
+    overlaps = gap.overlap_groups()
+    overlap_html = ""
+    if overlaps:
+        n_tests = sum(len(m) for _, m in overlaps)
+        blocks = "".join(f"""
+        <tr><td>{_esc(label)}</td><td class="num">{len(members)}</td><td>{'<br>'.join(
+            f'<span class="mono">{_esc(x.tcms_id)}</span> {_esc(x.tcms_title)} ({x.score:.0%})' for x in members)}</td></tr>"""
+                         for label, members in overlaps)
+        overlap_html = f"""
+  <h3>Test cases that matched the same behavior</h3>
+  <p class="subhead">{n_tests} test case{'s' if n_tests != 1 else ''} fall into {len(overlaps)} group{'s' if len(overlaps) != 1 else ''}
+  where several tests matched one and the same state-changing action the crawl performed. A prompt to review them
+  together, <b>not a verdict that they are duplicates</b>: matching compares each test to what the app does, so
+  distinct checks of one action (valid input, empty input, repeat...) land here too. Tests that only matched
+  plain navigation, and tests you've confirmed by hand, are not included.</p>
+  <div class="table-scroll"><table class="data-table"><thead><tr><th>Matched behavior</th>
+    <th class="num">Tests</th><th>Test cases (score against that behavior)</th></tr></thead>
+    <tbody>{blocks}</tbody></table></div>"""
+
     # Matching is action-level now (see gap_analysis.py docstring), so a
     # "covered" flow doing several things has each of them independently
     # verified, not just guessed as a whole -- worth showing the evidence,
@@ -483,6 +502,7 @@ def _gap_section_html(gap: GapAnalysis | None, run: RunResult) -> str:
   <p class="subhead">Could be a stale test for behavior that no longer exists, an app change, or something this crawl's risk policy or limits didn't reach — the report doesn't guess which, worth a human look either way.</p>
   <div class="table-scroll">{not_found_html}</div>
   {covered_html}
+  {overlap_html}
   {multi_action_html}
   {nav_note}"""
 

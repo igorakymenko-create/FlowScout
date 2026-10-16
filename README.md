@@ -42,6 +42,10 @@ verify quickly — it doesn't replace knowing what to point it at.
   Xray, qTest, or similar) and reports each flow as covered, partially
   covered, or a gap — plus which of your test cases the crawl never
   touched at all.
+- **Points out test cases that look redundant**: when several of your
+  test cases matched one and the same action the crawl performed, the
+  report groups them as "review together" -- a prompt, not a verdict
+  (distinct checks of one action land there too).
 - **Generates test-case drafts** (Markdown + a TCMS-importable CSV) and
   runnable `pytest-playwright` specs from what it found.
 - **Tracks changes across runs** for the same project, so a second

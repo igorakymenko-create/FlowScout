@@ -452,6 +452,17 @@ class TcmsCoverage:
     # picking one.
     diagnosis: Optional[str] = None         # "withheld" | "errored" | "discovered_not_walked" | None
     diagnosis_detail: Optional[str] = None  # human-readable, ready for the report
+    # What this test case matched ON -- "action:<signature>" for a
+    # mutating action, "nav:<flow id>" for a navigation flow -- plus a
+    # human-readable label of it. Several test cases landing on the
+    # SAME action are a "review these together" signal (see
+    # GapAnalysis.overlap_groups; navigation keys are recorded but not
+    # grouped); matched_flow_id above can't serve as
+    # that key, since it's only one of possibly many flows performing
+    # the same action. None for confirmed (human-decided) pairings and
+    # for anything not_found.
+    match_group: Optional[str] = None
+    match_label: Optional[str] = None
 
 
 @dataclass
@@ -462,8 +473,36 @@ class GapAnalysis:
     flow_coverage: list[FlowCoverage] = field(default_factory=list)
     tcms_coverage: list[TcmsCoverage] = field(default_factory=list)
 
+    def overlap_groups(self) -> list[tuple[str, list["TcmsCoverage"]]]:
+        """Groups of 2+ covered, inferred (not human-confirmed) test
+        cases that matched the SAME mutating action, largest group
+        first, as (label, members). Navigation-flow matches are
+        deliberately NOT grouped: a navigation flow is a whole path
+        (log in, then open a product...), so several clearly different
+        tests legitimately match it -- measured on a real run, "Login
+        with valid credentials" and "View a product's detail page"
+        both matched the same navigation flow, a misleading group.
+        A single action is a far tighter unit. A "review these together"
+        signal, NOT a duplicate verdict: matching is against the
+        discovered behavior, so several tests exercising one action
+        (valid input, empty input, repeat...) group here too even
+        though each is a different, legitimate check -- see the report's
+        own wording. Confirmed pairings are left out: a human already
+        decided what those mean."""
+        groups: dict[str, list[TcmsCoverage]] = {}
+        labels: dict[str, str] = {}
+        for x in self.tcms_coverage:
+            if x.status == "covered" and not x.confirmed and (x.match_group or "").startswith("action:"):
+                groups.setdefault(x.match_group, []).append(x)
+                labels.setdefault(x.match_group, x.match_label or x.match_group)
+        out = [(labels[k], sorted(v, key=lambda c: -c.score)) for k, v in groups.items() if len(v) >= 2]
+        return sorted(out, key=lambda g: (-len(g[1]), g[0]))
+
     def summary(self) -> dict:
+        overlaps = self.overlap_groups()
         return {
+            "tcms_overlap_groups": len(overlaps),
+            "tcms_in_overlap_groups": sum(len(m) for _, m in overlaps),
             "flows_covered": sum(1 for x in self.flow_coverage if x.status == "covered"),
             "flows_partial": sum(1 for x in self.flow_coverage if x.status == "partial"),
             "flows_gap": sum(1 for x in self.flow_coverage if x.status == "gap"),

@@ -5741,3 +5741,49 @@ silent for a correct config. 15 new tests (matching matrix incl. the
 reported case, IPv6, userinfo, case; classify keeps blocking a
 different host). Saucedemo regression and the full suite: see the
 commit.
+
+## Test cases that matched the same behavior (done, Oct 2026)
+
+Raised by the operator: with a real plan of ~1000 test cases, some are
+duplicates of each other -- and since gap analysis already embeds every
+test case and compares it to what the crawl found, "five tests describe
+the same found behavior" is visible in data we already have. It wasn't
+surfaced anywhere: each test got its own covered/not_found row, with no
+test-vs-test comparison at all (duplicate detection existed only
+between discovered FLOWS, never between test cases).
+
+**What was built (first, cheap tier -- no new embedding calls).**
+`TcmsCoverage` now records what a test matched ON (`match_group`:
+`action:<signature>` / `nav:<flow id>`, plus a readable `match_label`);
+`GapAnalysis.overlap_groups()` collects covered, non-confirmed tests
+sharing one action key, largest group first, best score first. The
+report gets a "Test cases that matched the same behavior" section.
+Old `gap_analysis.json` files (without the new fields) still load.
+
+**Deliberately worded as "review together", not "duplicates".** Matching
+compares each test to what the APP does, so distinct legitimate checks
+of one action (valid input, empty input, repeat...) land in one group
+too. `matched_flow_id` couldn't be the key (it's only one of possibly
+many flows performing the action) -- hence the stored key.
+
+**Measured on a real crawl, and one design correction it forced.**
+Saucedemo crawled live with the stock 10-case plan plus 5 added cases
+(3 near-duplicates of "add to cart" worded differently, one "finish
+checkout" case, one unrelated "reset app state"): TC-02 + DUP-01/02/03
+landed in one group (78-83%), while `remove` (TC-07) and `reset` stayed
+alone. But the first version also grouped TC-01 "Login with valid
+credentials" with TC-03 "View a product's detail page" -- both
+matched the same *navigation* flow, since a navigation flow is a whole
+path (log in, open a product) that several different tests legitimately
+touch. Navigation matches are therefore still recorded but never
+grouped; only a single mutating action is a tight enough unit.
+
+**Not covered, said plainly:** (1) test-vs-test comparison directly --
+duplicates among tests the crawl never reached (`not_found`) can't be
+found this way, and need their own calibrated threshold (the 0.74 here
+was measured for test-vs-machine-text, not test-vs-test); that's the
+next tier, not done. (2) The "finish checkout" duplicate pair in the
+fixture couldn't be exercised: checkout wasn't completed in that
+crawl (both tests `not_found`), so neither was grouped.
+
+6 new tests; 82 total pass. Saucedemo regression: see the commit.

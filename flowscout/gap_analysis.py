@@ -517,6 +517,7 @@ def analyze_gaps(run: RunResult, tcms_items: list[TcmsItem], tcms_source: str,
             tcms_coverage[tid] = TcmsCoverage(
                 tcms_id=tid, tcms_title=tcms_by_id[tid].title, status="covered",
                 matched_flow_id=_pick_matched_flow_id(action_owners[sig], unique_flow_ids), score=score,
+                match_group=f"action:{sig}", match_label=action_text[sig],
             )
 
         # Pass 2: navigation flows, only against whatever's still unclaimed.
@@ -528,6 +529,7 @@ def analyze_gaps(run: RunResult, tcms_items: list[TcmsItem], tcms_source: str,
                 tcms_coverage[tid] = TcmsCoverage(
                     tcms_id=tid, tcms_title=tcms_by_id[tid].title, status="covered",
                     matched_flow_id=fid, score=score,
+                    match_group=f"nav:{fid}", match_label=nav_text.get(fid, f"flow #{fid}"),
                 )
         else:
             nav_verdict = {fid: ("gap", None, None, 0.0) for fid in nav_vecs}
